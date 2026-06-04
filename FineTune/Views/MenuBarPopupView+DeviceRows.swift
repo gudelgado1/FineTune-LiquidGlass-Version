@@ -148,13 +148,35 @@ extension MenuBarPopupView {
     /// the devices and apps sections — at that level (not inside `devicesContent`)
     /// so the dividers above and below it are symmetric section-style dividers.
     /// Output tab only, and hidden in edit mode, is enforced by the caller.
+    /// Sentinel `expandedRowID` value for the Sound Effects selector — disjoint from
+    /// device UIDs and app persistence IDs, so it shares the single-open-row slot
+    /// without colliding.
+    static let systemSoundsRowID = "__system_sounds__"
+
     var systemSoundsRow: some View {
         SystemSoundsRow(
             alertVolume: deviceVolumeMonitor.alertVolume,
             onAlertVolumeChange: { deviceVolumeMonitor.setAlertVolume($0) },
             devices: sortedDevices,
             selectedDeviceUID: deviceVolumeMonitor.systemDeviceUID,
-            isFollowingDefault: deviceVolumeMonitor.isSystemFollowingDefault
+            isFollowingDefault: deviceVolumeMonitor.isSystemFollowingDefault,
+            defaultDeviceUID: deviceVolumeMonitor.defaultDeviceUID,
+            isExpanded: expandedRowID == Self.systemSoundsRowID,
+            onToggleExpand: {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    expandedRowID = (expandedRowID == Self.systemSoundsRowID) ? nil : Self.systemSoundsRowID
+                }
+            },
+            onSelectDevice: { uid in
+                if let device = sortedDevices.first(where: { $0.uid == uid }) {
+                    deviceVolumeMonitor.setSystemDeviceExplicit(device.id)
+                }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { expandedRowID = nil }
+            },
+            onSelectFollowDefault: {
+                deviceVolumeMonitor.setSystemFollowDefault()
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { expandedRowID = nil }
+            }
         )
     }
 

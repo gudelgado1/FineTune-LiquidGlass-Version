@@ -1,29 +1,32 @@
 // FineTune/Views/Rows/SystemSoundsRow.swift
 import SwiftUI
 
-/// Popup row for the macOS system **alert volume** — the same value as System
-/// Settings → Sound → "Sound Effects" → Alert volume, driven through
-/// `DeviceVolumeMonitor.setAlertVolume`.
+/// Popup row for the macOS system **alert volume** plus an expandable selector for
+/// the **system-sounds output device** (`kAudioHardwarePropertyDefaultSystemOutputDevice`
+/// — System Settings → Sound → "Play sound effects through").
 ///
-/// Layout is a copy of `DeviceRow`/`AppRow` (same `ExpandableGlassRow` container,
-/// 28 pt leading badge, name + optional subtitle, then mute + Liquid Glass slider +
-/// hover-reveal percentage) so it aligns pixel-for-pixel with those rows. The
-/// leading badge is decorative; the routed device is shown as the subtitle, and
-/// the routing target itself is changed in Settings → Audio.
+/// Layout mirrors `AppRow`: a leading badge, the name + a chevron that expands an
+/// inline panel (the same motion vocabulary as the per-app EQ / per-device AutoEQ),
+/// then mute + Liquid Glass alert slider + hover-reveal percentage. The expanded
+/// panel lists the output devices so sound effects can be routed straight from the
+/// popup instead of only Settings → Audio.
 ///
 /// **DDC note:** the alert volume is a macOS-software scalar, independent of a
-/// monitor's DDC hardware volume (VCP 0x62). A monitor exposes a single hardware
-/// volume that attenuates the entire HDMI stream — effects included — so there is no
-/// separate per-effects hardware level to capture. This row surfaces the macOS-side
-/// controls that *are* adjustable.
+/// monitor's DDC hardware volume (VCP 0x62).
 struct SystemSoundsRow: View {
     let alertVolume: Float
     let onAlertVolumeChange: (Float) -> Void
 
-    // Read-only routing info for the subtitle (routing is changed in Settings → Audio).
+    // Routing: where system sound effects play, and the selector callbacks.
     let devices: [AudioDevice]
     let selectedDeviceUID: String?
     let isFollowingDefault: Bool
+    let defaultDeviceUID: String?
+
+    let isExpanded: Bool
+    let onToggleExpand: () -> Void
+    let onSelectDevice: (String) -> Void
+    let onSelectFollowDefault: () -> Void
 
     let isFocused: Bool
 
@@ -33,8 +36,7 @@ struct SystemSoundsRow: View {
     @State private var isPercentageEditing = false
     /// Slider position restored when unmuting from 0.
     @State private var preMuteVolume: Double = 0.5
-    /// Suppresses write-back when the slider is being synced from an external
-    /// alert-volume change (poll / Settings edit), mirroring `DeviceRow`.
+    /// Suppresses write-back when the slider is synced from an external change.
     @State private var isUpdatingSliderFromExternal = false
 
     private let defaultUnmuteVolume: Double = 0.5
@@ -45,6 +47,11 @@ struct SystemSoundsRow: View {
         devices: [AudioDevice],
         selectedDeviceUID: String?,
         isFollowingDefault: Bool,
+        defaultDeviceUID: String?,
+        isExpanded: Bool,
+        onToggleExpand: @escaping () -> Void,
+        onSelectDevice: @escaping (String) -> Void,
+        onSelectFollowDefault: @escaping () -> Void,
         isFocused: Bool = false
     ) {
         self.alertVolume = alertVolume
@@ -52,6 +59,11 @@ struct SystemSoundsRow: View {
         self.devices = devices
         self.selectedDeviceUID = selectedDeviceUID
         self.isFollowingDefault = isFollowingDefault
+        self.defaultDeviceUID = defaultDeviceUID
+        self.isExpanded = isExpanded
+        self.onToggleExpand = onToggleExpand
+        self.onSelectDevice = onSelectDevice
+        self.onSelectFollowDefault = onSelectFollowDefault
         self.isFocused = isFocused
         self._sliderValue = State(initialValue: Double(max(0, min(1, alertVolume))))
     }
@@ -59,10 +71,8 @@ struct SystemSoundsRow: View {
     private var displayedPercentage: Int { Int(round(sliderValue * 100)) }
     private var showMutedIcon: Bool { displayedPercentage == 0 }
 
-    /// Where system sounds currently play — shown as the row subtitle. Returns
-    /// `nil` while following the default device (the leading badge already shows
-    /// that device's icon), mirroring `AppRow`'s routing subtitle behavior so the
-    /// row collapses to a single line in that case.
+    /// Where system sounds currently play — shown as the row subtitle. `nil` while
+    /// following the default (the row collapses to a single line, like `AppRow`).
     private var routingSubtitle: String? {
         if isFollowingDefault { return nil }
         if let uid = selectedDeviceUID, let device = devices.first(where: { $0.uid == uid }) {
@@ -72,26 +82,34 @@ struct SystemSoundsRow: View {
     }
 
     var body: some View {
-        // Same container as AppRow / DeviceRow so padding, hover surface, corner
-        // radius, and height match exactly. There's no expandable panel here, so
-        // `isExpanded` is always false and the expanded content is empty.
         ExpandableGlassRow(
-            isExpanded: false,
+            isExpanded: isExpanded,
             isFocused: isFocused,
             onHoverChanged: { isRowHovered = $0 }
         ) {
             HStack(spacing: DesignTokens.Spacing.sm) {
-                // Leading 28 pt control — the routed device's badge, tappable to
-                // re-route. Matches the device-row badge column.
-                routingPicker
+                // Leading bell badge — marks this as the system alert/effects channel.
+                DeviceBadge(icon: nil, isSelected: false, fallbackSymbol: "bell.fill")
 
-                // Name + optional routed-device subtitle, identical structure to
-                // AppRow/DeviceRow (rowName on top, 9 pt tertiary subtitle below).
+                // Name + chevron — tapping toggles the inline device selector, the
+                // same motion as the per-app EQ and per-device AutoEQ panels.
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Sound Effects")
-                        .font(DesignTokens.Typography.rowName)
-                        .lineLimit(1)
-                        .help("Sound Effects")
+                    HStack(spacing: 4) {
+                        Text("Sound Effects")
+                            .font(DesignTokens.Typography.rowName)
+                            .lineLimit(1)
+                            .help("Sound Effects")
+
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(
+                                isExpanded
+                                    ? DesignTokens.Colors.accentPrimary
+                                    : DesignTokens.Colors.textTertiary
+                            )
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isExpanded)
+                    }
 
                     if let subtitle = routingSubtitle {
                         Text(subtitle)
@@ -101,6 +119,8 @@ struct SystemSoundsRow: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { onToggleExpand() }
 
                 // Mute: alert volume → 0, restoring the prior level on unmute.
                 MuteButton(isMuted: showMutedIcon, levelFraction: sliderValue) {
@@ -112,8 +132,7 @@ struct SystemSoundsRow: View {
                     }
                 }
 
-                // Alert volume — linear 0...1 (the macOS alert scalar, not a device
-                // gain, so no perceptual tier mapping is applied).
+                // Alert volume — linear 0...1 macOS scalar (no perceptual tier mapping).
                 LiquidGlassSlider(
                     value: $sliderValue,
                     onEditingChanged: { editing in isEditing = editing }
@@ -145,7 +164,6 @@ struct SystemSoundsRow: View {
             }
             .frame(height: DesignTokens.Dimensions.rowContentHeight)
             .onChange(of: alertVolume) { _, newValue in
-                // Sync from external changes only when the user isn't dragging.
                 guard !isEditing else { return }
                 let clamped = Double(max(0, min(1, newValue)))
                 guard clamped != sliderValue else { return }
@@ -153,16 +171,76 @@ struct SystemSoundsRow: View {
                 sliderValue = clamped
             }
         } expandedContent: {
-            EmptyView()
+            deviceSelector
         }
     }
 
-    /// Leading badge — a clean circular `DeviceBadge`, pixel-identical to the
-    /// device-row badges, with a fixed bell glyph marking this as the system
-    /// alert/effects channel. Decorative: routing for sound effects lives in
-    /// Settings → Audio (a popup-anchored picker mis-positions, and the native
-    /// menu clashed with the glass styling).
-    private var routingPicker: some View {
-        DeviceBadge(icon: nil, isSelected: false, fallbackSymbol: "bell.fill")
+    /// Inline list of output devices for routing system sound effects — "System
+    /// Audio" (follow default) plus each connected device, with the active one
+    /// checked. Occupies the same expanded-content slot the EQ panel uses.
+    private var deviceSelector: some View {
+        let followSymbol = devices.first(where: { $0.uid == defaultDeviceUID })?.id.suggestedIconSymbol() ?? "circle.dashed"
+        return VStack(spacing: 1) {
+            SoundEffectsDeviceOption(
+                label: "System Audio",
+                symbol: followSymbol,
+                isSelected: isFollowingDefault,
+                action: onSelectFollowDefault
+            )
+            ForEach(devices, id: \.uid) { device in
+                SoundEffectsDeviceOption(
+                    label: device.name,
+                    symbol: device.id.suggestedIconSymbol(),
+                    isSelected: !isFollowingDefault && device.uid == selectedDeviceUID,
+                    action: { onSelectDevice(device.uid) }
+                )
+            }
+        }
+        .padding(.top, DesignTokens.Spacing.xs)
+        .padding(.bottom, 2)
+    }
+}
+
+/// One selectable device row inside the Sound Effects expanded panel.
+private struct SoundEffectsDeviceOption: View {
+    let label: String
+    let symbol: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: DesignTokens.Spacing.sm) {
+                Image(systemName: symbol)
+                    .font(.system(size: 12))
+                    .frame(width: 18)
+                    .foregroundStyle(isSelected ? DesignTokens.Colors.accentPrimary : DesignTokens.Colors.textSecondary)
+
+                Text(label)
+                    .font(DesignTokens.Typography.rowName)
+                    .foregroundStyle(DesignTokens.Colors.textPrimary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(DesignTokens.Colors.accentPrimary)
+                }
+            }
+            .padding(.horizontal, DesignTokens.Spacing.sm)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: DesignTokens.Dimensions.buttonRadius)
+                    .fill(isHovered ? DesignTokens.Colors.hoverSurface : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .animation(DesignTokens.Animation.hover, value: isHovered)
     }
 }

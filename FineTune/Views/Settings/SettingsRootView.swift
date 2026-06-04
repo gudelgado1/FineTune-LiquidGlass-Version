@@ -279,11 +279,13 @@ struct SettingsRootView: View {
                 .frame(width: 46, height: 46)
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(isCloseButtonHovered ? Color.primary : DesignTokens.Colors.textSecondary)
-        .modifier(CloseButtonGlassModifier(isHovered: isCloseButtonHovered))
+        // CloseButtonStyle owns the glass + the spin/grow/press animation so the
+        // icon and its glass circle transform together.
+        .buttonStyle(CloseButtonStyle(isHovered: isCloseButtonHovered))
+        // White X on the red glass when hovered; muted at rest.
+        .foregroundStyle(isCloseButtonHovered ? Color.white : DesignTokens.Colors.textSecondary)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.5)) {
                 isCloseButtonHovered = hovering
             }
         }
@@ -324,24 +326,51 @@ struct SettingsRootView: View {
 private struct CloseButtonGlassModifier: ViewModifier {
     let isHovered: Bool
 
+    /// macOS "close" traffic-light coral (#FF5F57).
+    private var closeRed: Color { Color(red: 1.0, green: 0.373, blue: 0.341) }
+
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
             content
-                .glassEffect(.regular.interactive(), in: .circle)
+                .glassEffect(
+                    isHovered ? .regular.tint(closeRed).interactive() : .regular.interactive(),
+                    in: .circle
+                )
         } else {
             content
+                // On hover the circle fills coral over the material; at rest it's
+                // just the frosted glass.
+                .background(isHovered ? closeRed.opacity(0.92) : Color.clear, in: Circle())
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay {
                     Circle()
                         .strokeBorder(
                             isHovered
-                                ? DesignTokens.Colors.glassRowBorderHover.opacity(0.9)
+                                ? closeRed.opacity(0.9)
                                 : DesignTokens.Colors.glassRowBorderHover,
                             lineWidth: 0.7
                         )
                 }
                 .scaleEffect(isHovered ? 1.08 : 1.0)
         }
+    }
+}
+
+/// Animated button style for the Settings close control: on hover the X spins a
+/// springy quarter-turn and grows while the glass circle lights up; on press the
+/// whole control dips and snaps back. The glass lives here (not as an outer
+/// modifier) so the icon and circle scale as one.
+private struct CloseButtonStyle: ButtonStyle {
+    let isHovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .rotationEffect(.degrees(isHovered ? 90 : 0))
+            .scaleEffect(isHovered ? 1.16 : 1.0)
+            .modifier(CloseButtonGlassModifier(isHovered: isHovered))
+            .scaleEffect(configuration.isPressed ? 0.86 : 1.0)
+            .animation(.spring(response: 0.34, dampingFraction: 0.5), value: isHovered)
+            .animation(.spring(response: 0.24, dampingFraction: 0.55), value: configuration.isPressed)
     }
 }
 
