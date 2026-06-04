@@ -307,6 +307,15 @@ struct FineTuneApp: App {
             queue: .main
         ) { [settings, monitor, accessibilityService, hud, coordinator] _ in
             MainActor.assumeIsolated {
+                // Synchronously destroy this instance's aggregate devices BEFORE the
+                // process exits. CoreAudio aggregate devices are system-wide and
+                // survive process death, so a normal quit would otherwise LEAK them —
+                // leaving the tapped app muted by an orphaned `.mutedWhenTapped` tap
+                // and forcing the next launch to race destroy-vs-recreate (the
+                // "doesn't capture an already-open app after reopen" bug). The tap's
+                // own `invalidate()` is async (won't finish before exit), so use the
+                // synchronous device sweep here.
+                OrphanedTapCleanup.destroyOrphanedDevices()
                 coordinator.stop()
                 monitor.stop()
                 accessibilityService.stop()

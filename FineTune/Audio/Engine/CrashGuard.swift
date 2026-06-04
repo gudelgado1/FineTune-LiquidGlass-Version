@@ -59,6 +59,11 @@ enum CrashGuard {
         signal(SIGSEGV, crashSignalHandler)
         signal(SIGBUS, crashSignalHandler)
         signal(SIGTRAP, crashSignalHandler)
+        // SIGTERM (logout, `kill`, system shutdown) is a *normal* termination, not a
+        // crash, but aggregate devices must still be destroyed before exit or they
+        // leak system-wide and keep the tapped app muted. Same handler: destroy the
+        // tracked devices, then re-raise for default termination behavior.
+        signal(SIGTERM, crashSignalHandler)
     }
 
     /// Registers an aggregate device for crash-safe cleanup.
