@@ -1,0 +1,85 @@
+# FineTune .gitignore — Swift / Xcode + macOS conventions
+# Based on github.com/github/gitignore/blob/main/Swift.gitignore with
+# project-specific additions for things that have leaked into commits.
+
+# ---------------------------------------------------------------------------
+# macOS Finder metadata
+# ---------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.fseventsd
+.Spotlight-V100
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ---------------------------------------------------------------------------
+# Xcode user-specific
+# ---------------------------------------------------------------------------
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+DerivedData/
+build/
+Build/
+.build/
+
+# Project-specific Xcode workspace customisations that aren't shared.
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# ---------------------------------------------------------------------------
+# Swift Package Manager
+# ---------------------------------------------------------------------------
+Packages/
+Package.pins
+*.xcodeproj/*.xcworkspace/xcshareddata/swiftpm/Package.resolved.lock
+.swiftpm/
+.netrc
+
+# Note: Package.resolved IS committed (shared lockfile).
+
+# ---------------------------------------------------------------------------
+# Coverage / profiling
+# ---------------------------------------------------------------------------
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+default.profraw
+coverage/
+*.coverage
+
+# ---------------------------------------------------------------------------
+# Test results / logs
+# ---------------------------------------------------------------------------
+*.xcresult
+*.log
+TestResults/
+
+# ---------------------------------------------------------------------------
+# Backups / drafts / editor scratch
+# ---------------------------------------------------------------------------
+*.bak
+*.orig
+*.swp
+*~
+*.tmp
+
+# ---------------------------------------------------------------------------
+# Distribution / archive output
+# ---------------------------------------------------------------------------
+Distribution/
+Archives/
+*.app.zip
+*.pkg

@@ -1,0 +1,393 @@
+// FineTune/FineTuneApp.swift
+import SwiftUI
+import UserNotifications
+import AppKit
+import os
+
+private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "App")
+private var uiTestHostWindow: NSWindow?
+
+private final class SettingsPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    var audioEngine: AudioEngine?
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let audioEngine = audioEngine else {
+            return
+        }
+        let urlHandler = URLHandler(audioEngine: audioEngine)
+
+        for url in urls {
+            urlHandler.handleURL(url)
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner])
+    }
+
+    /// LSUIElement agent — closing the Settings window must not terminate the app.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
+@main
+struct FineTuneApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @State private var audioEngine: AudioEngine
+    @State private var accessibility: AccessibilityPermissionService
+    @State private var notifications: NotificationPermission
+    @State private var mediaKeyStatus: MediaKeyStatus
+    @State private var popupVisibility: PopupVisibilityService
+    @State private var hudController: HUDWindowController
+    @State private var mediaKeyMonitor: MediaKeyMonitor
+    @State private var iconCoordinator: MenuBarIconCoordinator
+    @State private var menuBarPopupController: MenuBarPopupController
+    @State private var shortcutsRegistry: ShortcutsRegistry
+    @State private var resolver: TargetAppResolver
+    @StateObject private var updateManager = UpdateManager()
+    @State private var showMenuBarExtra = true
+    @State private var customSettingsWindow: NSWindow?
+
+    /// Snapshot icon computed at launch from the user's chosen style and the current
+    /// default-device volume/mute. The coordinator keeps it in sync afterwards.
+    private let launchIconImage: NSImage
+
+    var body: some Scene {
+        // Declared before FluidMenuBarExtra so this Settings scene wins over
+        // FluidMenuBarExtra's `Settings {}` placeholder. Both ⌘, and the
+        // gear button route here via openSettings().
+        Settings {
+            settingsContent
+        }
+        FluidMenuBarExtra("FineTune", image: launchIconImage, isInserted: $showMenuBarExtra) {
+            menuBarContent
+        }
+    }
+
+    @ViewBuilder
+    private var menuBarContent: some View {
+        // `deviceVolumeMonitor` is declared as `any DeviceVolumeProviding` on
+        // AudioEngine so tests can inject mocks; in production it's always the
+        // concrete `DeviceVolumeMonitor` that this view consumes directly.
+        MenuBarPopupView(
+            audioEngine: audioEngine,
+            deviceVolumeMonitor: audioEngine.deviceVolumeMonitor as! DeviceVolumeMonitor,
+            updateManager: updateManager,
+            permission: audioEngine.permission,
+            accessibility: accessibility,
+            mediaKeyStatus: mediaKeyStatus,
+            popupVisibility: popupVisibility,
+            hudController: hudController,
+            mediaKeyMonitor: mediaKeyMonitor,
+            openSettingsOverride: openCustomSettingsWindow
+        )
+        .task {
+            // Idempotent: subsequent task runs (popup re-open) are no-ops inside start().
+            shortcutsRegistry.start()
+        }
+    }
+
+    private var settingsContent: some View {
+        SettingsRootView(
+            settings: audioEngine.settingsManager,
+            audioEngine: audioEngine,
+            deviceVolumeMonitor: audioEngine.deviceVolumeMonitor as! DeviceVolumeMonitor,
+            accessibility: accessibility,
+            notifications: notifications,
+            mediaKeyStatus: mediaKeyStatus,
+            mediaKeyMonitor: mediaKeyMonitor,
+            shortcutsRegistry: shortcutsRegistry,
+            updateManager: updateManager
+        )
+    }
+
+    private func openCustomSettingsWindow() {
+        if let window = customSettingsWindow {
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let hostingView = NSHostingView(rootView: settingsContent)
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+
+        let window = SettingsPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
+            styleMask: [.borderless, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.isMovableByWindowBackground = false
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior = [.fullScreenAuxiliary]
+        window.minSize = NSSize(width: 860, height: 580)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        customSettingsWindow = window
+    }
+
+    private static var isRunningUITests: Bool {
+        ProcessInfo.processInfo.arguments.contains("--ui-testing")
+    }
+
+    private static var isRunningSettingsUITests: Bool {
+        ProcessInfo.processInfo.arguments.contains("--ui-testing-settings")
+    }
+
+    init() {
+        // Install crash handler to clean up aggregate devices on abnormal exit
+        CrashGuard.install()
+        // Destroy any orphaned aggregate devices from previous crashes
+        OrphanedTapCleanup.destroyOrphanedDevices()
+
+        let settings = SettingsManager()
+        let profileManager = AutoEQProfileManager()
+        let permission = AudioRecordingPermission()
+        let engine = AudioEngine(permission: permission, settingsManager: settings, autoEQProfileManager: profileManager)
+        _audioEngine = State(initialValue: engine)
+
+        // Media keys / HUD services — instantiated at app scope so the tap
+        // and HUD panel outlive popup open/close cycles.
+        let accessibilityService = AccessibilityPermissionService()
+        let notificationPermission = NotificationPermission()
+        let statusService = MediaKeyStatus()
+        let popupService = PopupVisibilityService()
+        let hud = HUDWindowController(settingsManager: settings, mediaKeyStatus: statusService, popupVisibility: popupService)
+
+        // Wire the interactive Tahoe slider back to the device volume monitor.
+        // Mirrors the mute semantics applied for media-key drags (auto-unmute
+        // when ramping above 0 from muted; auto-mute when dragging down to 0)
+        // so the HUD slider and F11/F12 behave identically.
+        hud.volumeWriter = { [weak engine] sliderFraction in
+            guard let engine else { return }
+            let volumeMonitor = engine.deviceVolumeMonitor
+            let deviceID = volumeMonitor.defaultDeviceID
+            guard deviceID.isValid else { return }
+            let tier = volumeMonitor.outputVolumeBackend(for: deviceID)
+            let currentMute = volumeMonitor.muteStates[deviceID] ?? false
+            let willBeSilent = sliderFraction <= 0.001
+            if currentMute && !willBeSilent {
+                volumeMonitor.setMute(for: deviceID, to: false)
+            } else if !currentMute && willBeSilent {
+                volumeMonitor.setMute(for: deviceID, to: true)
+            }
+            let gain = VolumeMapping.systemGain(forSliderFraction: sliderFraction, tier: tier)
+            volumeMonitor.setVolume(for: deviceID, to: gain)
+        }
+
+        let monitor = MediaKeyMonitor(
+            decoder: IOKitMediaKeyDecoder(),
+            audioEngine: engine,
+            settingsManager: settings,
+            accessibility: accessibilityService,
+            hudController: hud,
+            popupVisibility: popupService,
+            mediaKeyStatus: statusService
+        )
+        _accessibility = State(initialValue: accessibilityService)
+        _notifications = State(initialValue: notificationPermission)
+        _mediaKeyStatus = State(initialValue: statusService)
+        _popupVisibility = State(initialValue: popupService)
+        _hudController = State(initialValue: hud)
+        _mediaKeyMonitor = State(initialValue: monitor)
+
+        let coordinator = MenuBarIconCoordinator(deviceVolumeMonitor: engine.deviceVolumeMonitor as! DeviceVolumeMonitor, settings: settings)
+        monitor.iconCoordinator = coordinator
+        // Defer start() so NSApplication.shared is fully bootstrapped before we walk NSApp.windows.
+        DispatchQueue.main.async { [coordinator] in coordinator.start() }
+        _iconCoordinator = State(initialValue: coordinator)
+
+        // Render the scene's first frame with the user's chosen style instead of a generic
+        // placeholder, so non-speaker styles don't briefly flash a speaker icon at launch.
+        let launchVolumeMonitor = engine.deviceVolumeMonitor
+        let launchID = launchVolumeMonitor.defaultDeviceID
+        let launchState = MenuBarIconState.baseline(
+            style: settings.appSettings.menuBarIconStyle,
+            volume: launchVolumeMonitor.volumes[launchID] ?? 1.0,
+            muted: launchVolumeMonitor.muteStates[launchID] ?? false
+        )
+        launchIconImage = launchState.image.nsImage()
+            ?? NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "FineTune")!
+
+        // Start Accessibility polling immediately so `isTrustedCached` is live
+        // before the user first opens Settings. The trust-flip callback wires
+        // the monitor to reconcile its tap state whenever trust changes — this
+        // is the single source of truth for retroactive start/stop (a `.onChange`
+        // inside MenuBarPopupView would miss flips when the popup is closed).
+        accessibilityService.onTrustChanged = { [weak monitor] _ in
+            monitor?.reconcile()
+        }
+        accessibilityService.start()
+        monitor.reconcile()
+
+        // Global hotkeys (KeyboardShortcuts SPM, Carbon-backed; no Accessibility
+        // permission required for the hotkey itself). Registry start() is deferred
+        // to a SwiftUI `.task` on the popup content so the FluidMenuBarExtra
+        // status item has been materialized before any hotkey can fire.
+        let popupController = MenuBarPopupController()
+        let resolver = TargetAppResolver(
+            ownBundleID: Bundle.main.bundleIdentifier ?? "com.finetuneapp.FineTune"
+        )
+        resolver.start()
+        let registry = ShortcutsRegistry(
+            settings: settings,
+            popupController: popupController,
+            resolver: resolver,
+            audioEngine: engine,
+            hud: hud
+        )
+        _menuBarPopupController = State(initialValue: popupController)
+        _shortcutsRegistry = State(initialValue: registry)
+        _resolver = State(initialValue: resolver)
+
+        // Pass engine to AppDelegate
+        _appDelegate.wrappedValue.audioEngine = engine
+
+        // Defer audio-capture permission dialog until after the first frame is
+        // drawn. Calling it synchronously in init() causes a visible freeze
+        // because the TCC SPI triggers a system modal before the UI is ready.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.0))
+            if permission.status == .unknown {
+                permission.request()
+            }
+        }
+
+        // DeviceVolumeMonitor is now created and started inside AudioEngine
+        // This ensures proper initialization order: deviceMonitor.start() -> deviceVolumeMonitor.start()
+
+        // Set delegate before requesting authorization so willPresent is called
+        UNUserNotificationCenter.current().delegate = _appDelegate.wrappedValue
+
+        // Request the remaining permissions at startup, staggered so the system
+        // modals don't stack on top of the audio (TCC) dialog above. Each is
+        // gated on "not yet decided/granted" so returning users aren't pestered
+        // — the OS also rate-limits repeat prompts. The Permissions settings tab
+        // mirrors all three statuses and offers a manual "Request All" button.
+
+        // Notifications (~2s) — routed through the tracked service so the tab updates.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.0))
+            if notificationPermission.state == .notDetermined {
+                notificationPermission.request()
+            }
+        }
+
+        // Accessibility (~3s, last) — promptForTrust() shows the standard system
+        // dialog only while untrusted and registers the app in the Accessibility list.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3.0))
+            if !accessibilityService.isTrusted {
+                accessibilityService.promptForTrust()
+            }
+        }
+
+        // Flush debounced settings + tear down the CGEventTap before dealloc.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [settings, monitor, accessibilityService, hud, coordinator] _ in
+            MainActor.assumeIsolated {
+                coordinator.stop()
+                monitor.stop()
+                accessibilityService.stop()
+                hud.shutdown()
+                settings.flushSync()
+            }
+        }
+
+        if Self.isRunningUITests {
+            DispatchQueue.main.async {
+                Self.openUITestHost(
+                    settings: settings,
+                    engine: engine,
+                    accessibility: accessibilityService,
+                    notifications: notificationPermission,
+                    mediaKeyStatus: statusService,
+                    popupVisibility: popupService,
+                    hud: hud,
+                    mediaKeyMonitor: monitor,
+                    shortcutsRegistry: registry
+                )
+            }
+        }
+    }
+
+    private static func openUITestHost(
+        settings: SettingsManager,
+        engine: AudioEngine,
+        accessibility: AccessibilityPermissionService,
+        notifications: NotificationPermission,
+        mediaKeyStatus: MediaKeyStatus,
+        popupVisibility: PopupVisibilityService,
+        hud: HUDWindowController,
+        mediaKeyMonitor: MediaKeyMonitor,
+        shortcutsRegistry: ShortcutsRegistry
+    ) {
+        let deviceVolumeMonitor = engine.deviceVolumeMonitor as! DeviceVolumeMonitor
+        let root: AnyView
+
+        if isRunningSettingsUITests {
+            root = AnyView(
+                SettingsRootView(
+                    settings: settings,
+                    audioEngine: engine,
+                    deviceVolumeMonitor: deviceVolumeMonitor,
+                    accessibility: accessibility,
+                    notifications: notifications,
+                    mediaKeyStatus: mediaKeyStatus,
+                    mediaKeyMonitor: mediaKeyMonitor,
+                    shortcutsRegistry: shortcutsRegistry,
+                    updateManager: UpdateManager()
+                )
+            )
+        } else {
+            root = AnyView(
+                MenuBarPopupView(
+                    audioEngine: engine,
+                    deviceVolumeMonitor: deviceVolumeMonitor,
+                    updateManager: UpdateManager(),
+                    permission: engine.permission,
+                    accessibility: accessibility,
+                    mediaKeyStatus: mediaKeyStatus,
+                    popupVisibility: popupVisibility,
+                    hudController: hud,
+                    mediaKeyMonitor: mediaKeyMonitor
+                )
+            )
+        }
+
+        let hostingView = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: isRunningSettingsUITests ? 640 : 720),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "FineTune UI Test Host"
+        window.contentView = hostingView
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        uiTestHostWindow = window
+    }
+}

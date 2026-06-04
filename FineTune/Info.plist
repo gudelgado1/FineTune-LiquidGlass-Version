@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.finetuneapp.FineTune</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>finetune</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>FineTune uses Apple Events to send Play/Pause, Next, and Previous to your chosen media app.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>FineTune needs access to control volume levels for individual applications.</string>
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/gudelgado1/FineTune-LiquidGlass-Version/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>xExSoQmCLDCez0KyhZ9EM9PdOZFZgyX/+VF+OVrpIlo=</string>
+</dict>
+</plist>

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+    <channel>
+        <title>FineTune (Liquid Glass Version) Updates</title>
+        <link>https://github.com/gudelgado1/FineTune-LiquidGlass-Version</link>
+        <description>Most recent updates to FineTune (Liquid Glass Version)</description>
+        <language>en</language>
+        <!--
+    No releases published yet, so the app reports "you're up to date".
+
+    Add ONE <item> per release, signed with YOUR Sparkle EdDSA key. Steps:
+      1. Generate your key once:  ./generate_keys   (stores private key in your
+         Keychain, prints the public key -> put it in Info.plist SUPublicEDKey).
+      2. Build + package the app (e.g. ./build-dmg.sh), then:
+         ./sign_update FineTune.dmg   ->  prints sparkle:edSignature and length.
+      3. Fill the template below, commit appcast.xml to main, and upload the .dmg
+         as the release asset at the matching URL.
+    See the project README for details.
+
+    Template:
+    <item>
+      <title>1.0.0</title>
+      <sparkle:version>1</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
+      <pubDate>Day, DD Mon YYYY HH:MM:SS +0000</pubDate>
+      <enclosure
+        url="https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/download/v1.0.0/FineTune.dmg"
+        sparkle:edSignature="ED_SIGNATURE_FROM_sign_update"
+        length="FILE_SIZE_BYTES"
+        type="application/octet-stream"/>
+    </item>
+    -->
+    </channel>
+</rss>
