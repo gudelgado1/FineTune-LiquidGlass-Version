@@ -232,7 +232,25 @@ extension AudioEngine {
         taskScheduler.scheduleRepeating(.healthMonitor, every: .seconds(2)) { [weak self] in
             guard let self else { return }
 
-            // Skip entirely when no taps exist — avoids unnecessary work at idle (#176)
+            // Self-heal: an actively-streaming app with no tap is otherwise never
+            // retried. `applyPersistedSettings()` only runs on app-list changes, and
+            // the responsiveness loop below only inspects EXISTING taps — so a one-off
+            // tap-creation failure (startup race, device momentarily busy, or the
+            // orphan-cleanup-vs-recreate race after a crash) would leave that app
+            // uncaptured until its audio next flickers. Re-apply to create the missing
+            // tap(s). MUST run before the no-taps guard so it still fires when the
+            // failure left `taps` empty.
+            let appsMissingTaps = self.apps.filter {
+                self.taps[$0.id] == nil && !self.settingsManager.isIgnored($0.persistenceIdentifier)
+            }
+            if !appsMissingTaps.isEmpty {
+                // Drop any stale "applied" mark so applyPersistedSettings retries them.
+                for app in appsMissingTaps { self.appliedPIDs.remove(app.id) }
+                self.logger.debug("Health self-heal: \(appsMissingTaps.count) active app(s) missing a tap — re-applying")
+                self.applyPersistedSettings()
+            }
+
+            // Skip the per-tap responsiveness check when no taps exist (#176)
             guard !self.taps.isEmpty else { return }
 
             let now = Date()
