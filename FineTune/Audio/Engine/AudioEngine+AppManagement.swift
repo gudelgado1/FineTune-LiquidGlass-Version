@@ -273,12 +273,9 @@ extension AudioEngine {
             if let existingTap = taps[app.id], existingTap.currentDeviceUIDs != [deviceUID] {
                 let preferredSource = preferredTapSourceDeviceUID(forOutputUIDs: [deviceUID], isFollowsDefault: followsDefault.contains(app.id))
                 Task {
-                    do {
-                        try await existingTap.switchDevice(to: deviceUID, preferredTapSourceDeviceUID: preferredSource)
+                    if await self.switchDeviceWithRetry(existingTap, to: [deviceUID], preferredTapSourceDeviceUID: preferredSource) {
                         self.applyTapOutputState(to: existingTap, for: app.id, deviceUIDs: [deviceUID])
                         self.applyAutoEQToTap(existingTap)
-                    } catch {
-                        self.logger.error("Failed to re-route \(app.name) to \(deviceUID): \(error.localizedDescription)")
                     }
                 }
                 appliedPIDs.insert(app.id)

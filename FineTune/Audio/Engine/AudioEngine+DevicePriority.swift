@@ -169,16 +169,48 @@ extension AudioEngine {
 
         Task {
             for (app, tap) in tapsToSwitch {
-                do {
-                    let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: [targetUID], isFollowsDefault: true)
-                    try await tap.switchDevice(to: targetUID, preferredTapSourceDeviceUID: preferredTapSourceUID)
+                let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: [targetUID], isFollowsDefault: true)
+                if await self.switchDeviceWithRetry(tap, to: [targetUID], preferredTapSourceDeviceUID: preferredTapSourceUID) {
                     self.applyTapOutputState(to: tap, for: app.id, deviceUIDs: [targetUID])
                     self.applyAutoEQToTap(tap)
-                } catch {
-                    self.logger.error("Failed to switch \(app.name) to \(targetUID): \(error.localizedDescription)")
                 }
             }
         }
+    }
+
+    /// Switches/updates a tap's output device(s) with bounded retries. CoreAudio
+    /// device switches can fail transiently (target just (re)connected, source just
+    /// died, HAL momentarily busy); without a retry the app is left on a wrong or
+    /// dead device with no recovery. Returns whether the switch ultimately succeeded.
+    @discardableResult
+    func switchDeviceWithRetry(
+        _ tap: any ProcessTapControlling,
+        to uids: [String],
+        preferredTapSourceDeviceUID: String?,
+        sourceDeviceDead: Bool = false,
+        multiDevice: Bool = false,
+        attempts: Int = 3
+    ) async -> Bool {
+        for attempt in 1...max(1, attempts) {
+            do {
+                if multiDevice {
+                    try await tap.updateDevices(to: uids, preferredTapSourceDeviceUID: preferredTapSourceDeviceUID, sourceDeviceDead: sourceDeviceDead)
+                } else {
+                    guard let uid = uids.first else { return false }
+                    try await tap.switchDevice(to: uid, preferredTapSourceDeviceUID: preferredTapSourceDeviceUID, sourceDeviceDead: sourceDeviceDead)
+                }
+                return true
+            } catch is CancellationError {
+                return false  // a newer switch superseded this one — don't fight it
+            } catch {
+                logger.warning("Device switch attempt \(attempt)/\(attempts) failed for \(tap.app.name): \(error.localizedDescription)")
+                if attempt < attempts {
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
+            }
+        }
+        logger.error("Device switch gave up after \(attempts) attempts for \(tap.app.name)")
+        return false
     }
 
     /// Called when device disappears - updates routing and switches taps immediately
@@ -256,26 +288,20 @@ extension AudioEngine {
             Task {
                 // Handle single-mode switches — source device is dead, skip crossfade
                 for (tap, fallbackUID) in singleModeTapsToSwitch {
-                    do {
-                        let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: [fallbackUID], isFollowsDefault: true)
-                        try await tap.switchDevice(to: fallbackUID, preferredTapSourceDeviceUID: preferredTapSourceUID, sourceDeviceDead: true)
+                    let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: [fallbackUID], isFollowsDefault: true)
+                    if await self.switchDeviceWithRetry(tap, to: [fallbackUID], preferredTapSourceDeviceUID: preferredTapSourceUID, sourceDeviceDead: true) {
                         self.applyTapOutputState(to: tap, for: tap.app.id, deviceUIDs: [fallbackUID])
                         self.applyAutoEQToTap(tap)
-                    } catch {
-                        self.logger.error("Failed to switch \(tap.app.name) to fallback: \(error.localizedDescription)")
                     }
                 }
 
                 // Handle multi-mode updates (remove disconnected device from aggregate)
                 // Source device is dead, skip crossfade
                 for (tap, remainingUIDs) in multiModeTapsToUpdate {
-                    do {
-                        let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: remainingUIDs, isFollowsDefault: self.followsDefault.contains(tap.app.id))
-                        try await tap.updateDevices(to: remainingUIDs, preferredTapSourceDeviceUID: preferredTapSourceUID, sourceDeviceDead: true)
+                    let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: remainingUIDs, isFollowsDefault: self.followsDefault.contains(tap.app.id))
+                    if await self.switchDeviceWithRetry(tap, to: remainingUIDs, preferredTapSourceDeviceUID: preferredTapSourceUID, sourceDeviceDead: true, multiDevice: true) {
                         self.applyTapOutputState(to: tap, for: tap.app.id, deviceUIDs: remainingUIDs)
                         self.logger.debug("Removed \(deviceName) from \(tap.app.name) multi-device output")
-                    } catch {
-                        self.logger.error("Failed to update \(tap.app.name) devices: \(error.localizedDescription)")
                     }
                 }
             }
@@ -328,13 +354,10 @@ extension AudioEngine {
         if !tapsToSwitch.isEmpty {
             Task {
                 for tap in tapsToSwitch {
-                    do {
-                        let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: [deviceUID], isFollowsDefault: false)
-                        try await tap.switchDevice(to: deviceUID, preferredTapSourceDeviceUID: preferredTapSourceUID)
+                    let preferredTapSourceUID = self.preferredTapSourceDeviceUID(forOutputUIDs: [deviceUID], isFollowsDefault: false)
+                    if await self.switchDeviceWithRetry(tap, to: [deviceUID], preferredTapSourceDeviceUID: preferredTapSourceUID) {
                         self.applyTapOutputState(to: tap, for: tap.app.id, deviceUIDs: [deviceUID])
                         self.applyAutoEQToTap(tap)
-                    } catch {
-                        self.logger.error("Failed to switch \(tap.app.name) back to \(deviceName): \(error.localizedDescription)")
                     }
                 }
             }
