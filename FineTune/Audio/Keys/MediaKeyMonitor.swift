@@ -29,6 +29,10 @@ final class MediaKeyMonitor {
     private var disableWatchdogTask: Task<Void, Never>?
     private(set) var watchdogOpen: Bool = false
 
+    /// One-shot automatic re-arm scheduled after the feature goes offline (kernel
+    /// stall). Backed off so a persistently-broken tap can't thrash.
+    private var offlineAutoRetryTask: Task<Void, Never>?
+
     /// 80 ms floor between DDC-tier repeats — DDC write queues saturate at key-repeat rate.
     var lastDDCRepeatTime: DispatchTime?
 
@@ -189,6 +193,8 @@ final class MediaKeyMonitor {
         disableWatchdogTask?.cancel()
         disableWatchdogTask = nil
         watchdogOpen = false
+        offlineAutoRetryTask?.cancel()
+        offlineAutoRetryTask = nil
         cancelGhostTapProbe()
 
         if let tap = tap {
@@ -379,6 +385,7 @@ final class MediaKeyMonitor {
             disableWatchdogTask?.cancel()
             disableWatchdogTask = nil
             watchdogOpen = false
+            scheduleOfflineAutoRetry()
             return
         }
 
@@ -393,6 +400,22 @@ final class MediaKeyMonitor {
 
         if let tap = tap {
             CGEvent.tapEnable(tap: tap, enable: true)
+        }
+    }
+
+    /// After the watchdog marks media keys offline (kernel stall), wait out a backoff
+    /// and attempt ONE automatic re-arm. If it sticks, `start()` clears `isOffline`;
+    /// if the kernel disables the fresh tap again, the watchdog re-marks offline and
+    /// schedules the next single retry — a slow self-heal, never a tight loop. The
+    /// manual "Retry" card still works at any time.
+    private func scheduleOfflineAutoRetry() {
+        offlineAutoRetryTask?.cancel()
+        offlineAutoRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard let self, !Task.isCancelled, self.mediaKeyStatus.isOffline else { return }
+            self.logger.info("Media keys offline for 30s — attempting automatic re-arm")
+            self.stop()
+            self.start()
         }
     }
 

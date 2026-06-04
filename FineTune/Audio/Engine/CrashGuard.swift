@@ -10,7 +10,7 @@ import os
 private nonisolated(unsafe) var gDeviceSlots: UnsafeMutablePointer<AudioObjectID>?
 private nonisolated(unsafe) var gDeviceCount: Int32 = 0
 private nonisolated(unsafe) var gDeviceLock = os_unfair_lock()
-private let gMaxDeviceSlots = 64
+private let gMaxDeviceSlots = 128
 
 // MARK: - Crash Signal Handler
 
