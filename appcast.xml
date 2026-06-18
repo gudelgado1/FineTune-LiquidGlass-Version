@@ -6,6 +6,15 @@
         <description>Most recent updates to FineTune (Liquid Glass Version)</description>
         <language>en</language>
         <item>
+            <title>1.0.1</title>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
+            <pubDate>Thu, 18 Jun 2026 06:21:02 +0000</pubDate>
+            <description><![CDATA[<h3>FineTune (Liquid Glass) 1.0.1</h3><p>Audio engine resilience: automatic capture recovery after system overload and <code>coreaudiod</code> restarts; wake-rebuild of stalled taps after standby; fixes audio cutting in/out under heavy load; DSP load-shedding under critical memory pressure; anti-thrashing and aggregate-device leak guards.</p>]]></description>
+            <enclosure url="https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/download/v1.0.1/FineTune.zip" sparkle:edSignature="RzVwWaGrFLvqEFLc52OhFXAHrd6SR87D+b39AWyQ+dGUlVm1UTMLtDZAdCzR2BJYyfGJJ6RSaDZpSUI2xwNmDA==" length="5199986" type="application/octet-stream"/>
+        </item>
+        <item>
             <title>1.0.0</title>
             <sparkle:version>1</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
