@@ -86,22 +86,44 @@ extension AudioEngine {
         }
     }
 
-    /// Tears down and recreates every tap whose app is currently active, clearing
-    /// the per-PID cooldown first (wake is an explicit "rebuild everything"
-    /// event). Falls back to a plain liveness pass when nothing is active.
+    /// Rebuilds the *stuck* taps after standby, clearing their per-PID cooldown
+    /// first (wake is an explicit rebuild event).
+    ///
+    /// Selective by design: a healthy aggregate fires its IO proc continuously —
+    /// even while the app outputs silence — so a tap that delivered a callback in
+    /// the last couple of seconds is provably still capturing and is left alone.
+    /// Only active taps with NO recent callback (a stalled/zombie IO proc, the
+    /// post-standby failure) are torn down and recreated. This avoids an
+    /// unnecessary audio blip and the per-tap `activate()` main-thread block on
+    /// every healthy tap each time the machine wakes.
+    ///
+    /// The target-device-alive guard keeps a tap whose device is still asleep
+    /// (e.g. an HDMI monitor) out of the rebuild — the `recreateDeadTaps()`
+    /// fallback / device-disconnect path owns that case.
+    ///
+    /// Caveat: this can't detect the rare "IO proc fires but output goes nowhere"
+    /// zombie (callbacks keep arriving). If that surfaces, switching output
+    /// rebuilds the tap; the common post-standby failure is a stalled IO proc,
+    /// which this catches.
     func rebuildActiveTapsAfterWake() async {
         let activePIDs = Set(apps.map { $0.id })
-        let pidsToRebuild = taps.keys.filter { activePIDs.contains($0) }
-        guard !pidsToRebuild.isEmpty else {
-            await recreateDeadTaps()
-            return
+        let stuckPIDs: [pid_t] = taps.compactMap { pid, tap in
+            guard activePIDs.contains(pid) else { return nil }
+            guard !tap.hasRecentAudioCallback(within: 2.0) else { return nil }
+            let targetAlive = tap.currentDeviceUIDs.contains { uid in
+                guard let id = deviceMonitor.device(for: uid)?.id else { return false }
+                return isAliveCheck(id)
+            }
+            return targetAlive ? pid : nil
         }
-        logger.notice("Wake: rebuilding \(pidsToRebuild.count) active tap(s) to clear any post-standby zombies")
-        for pid in pidsToRebuild {
-            tapRecoveryCooldownUntil.removeValue(forKey: pid)
-            await recreateTap(for: pid)
+        if !stuckPIDs.isEmpty {
+            logger.notice("Wake: rebuilding \(stuckPIDs.count) stuck tap(s) (no recent callback after settle)")
+            for pid in stuckPIDs {
+                tapRecoveryCooldownUntil.removeValue(forKey: pid)
+                await recreateTap(for: pid)
+            }
         }
-        // Catch any remaining taps that died outright (e.g. their device vanished).
+        // Catch any taps that died outright (e.g. their device vanished).
         await recreateDeadTaps()
     }
 

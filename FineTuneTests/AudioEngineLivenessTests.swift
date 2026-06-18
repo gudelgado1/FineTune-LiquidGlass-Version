@@ -250,8 +250,8 @@ struct AudioEngineLivenessTests {
         #expect(harness.engine.taps[app.id] === replacement)
     }
 
-    @Test("wake rebuild recreates active taps even when they report alive (zombie fix)")
-    func wakeRebuildRecreatesAliveTap() async {
+    @Test("wake rebuild recreates a stuck active tap (no recent callback) and bypasses cooldown")
+    func wakeRebuildRecreatesStuckTap() async {
         let app = makeApp(pid: 71008)
         let device = makeDevice(id: 708, uid: "spk", name: "Speaker")
         var replacement: LivenessTap?
@@ -260,9 +260,10 @@ struct AudioEngineLivenessTests {
             replacement = tap
             return tap
         }
-        // "Zombie": reports alive, but app is active → wake must rebuild it anyway,
-        // and bypass any standing cooldown.
+        // Stuck zombie: alive object AND no recent callback (IO proc stalled across
+        // sleep). App is active → wake must rebuild it, bypassing any cooldown.
         let zombie = LivenessTap(app: app, deviceUIDs: [device.uid], resourceAlive: true)
+        zombie.recentCallback = false
         harness.engine.taps[app.id] = zombie
         harness.engine.tapRecoveryCooldownUntil[app.id] = Date().addingTimeInterval(30)
 
@@ -272,6 +273,28 @@ struct AudioEngineLivenessTests {
         #expect(replacement != nil)
         #expect(harness.engine.taps[app.id] === replacement)
         #expect(replacement?.activateCallCount == 1)
+    }
+
+    @Test("wake rebuild leaves a healthy active tap (recent callback) untouched")
+    func wakeRebuildSkipsHealthyTap() async {
+        let app = makeApp(pid: 71015)
+        let device = makeDevice(id: 715, uid: "spk", name: "Speaker")
+        var factoryCalls = 0
+        let harness = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        // Healthy: IO proc still delivering callbacks → not stuck → must be left
+        // alone (no blip, no main-thread activate() block) even though wake fired.
+        let healthy = LivenessTap(app: app, deviceUIDs: [device.uid], resourceAlive: true)
+        healthy.recentCallback = true
+        harness.engine.taps[app.id] = healthy
+
+        await harness.engine.rebuildActiveTapsAfterWake()
+
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps[app.id] === healthy)
+        #expect(healthy.invalidateAsyncCallCount == 0)
     }
 
     @Test("wake rebuild leaves inactive (warm/paused) taps alone")
