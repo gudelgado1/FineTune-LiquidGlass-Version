@@ -28,6 +28,19 @@ protocol ProcessTapControlling: AnyObject {
     func hasRecentAudioCallback(within seconds: Double) -> Bool
     func isHealthCheckEligible(minActiveSeconds: Double) -> Bool
 
+    /// True while the tap's underlying CoreAudio aggregate device is still alive
+    /// server-side. Returns false when `coreaudiod` has destroyed the aggregate
+    /// (restart under memory pressure, HAL reset, system overload) — the IO proc
+    /// is dead and will never fire again, so the tap must be recreated. This is a
+    /// *direct* resource-validity check, independent of callback timing, so it
+    /// catches taps that died before ever rendering a buffer.
+    var isResourceAlive: Bool { get }
+
+    /// Temporarily bypasses the per-callback DSP stack (EQ / AutoEQ / loudness)
+    /// to shed CPU under memory/CPU pressure, reducing the chance of an IO-thread
+    /// overload while the system is thrashing. Re-enabled when pressure clears.
+    func setDSPBypass(_ bypass: Bool)
+
     var tapSourceDeviceUID: String? { get }
     var renderDiagnostics: TapRenderDiagnostics { get }
     func refreshTapSource(_ preferredDeviceUID: String?) async throws
@@ -55,4 +68,10 @@ extension ProcessTapControlling {
     var renderDiagnostics: TapRenderDiagnostics {
         TapRenderDiagnostics()
     }
+
+    /// Mocks are assumed alive unless they override this.
+    var isResourceAlive: Bool { true }
+
+    /// Default no-op for mocks that don't override.
+    func setDSPBypass(_ bypass: Bool) {}
 }

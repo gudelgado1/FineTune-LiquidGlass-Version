@@ -20,6 +20,43 @@ extension AudioObjectID {
         return status == noErr && isAlive != 0
     }
 
+    /// Three-state liveness for *teardown* decisions. Unlike `isDeviceAlive()`,
+    /// which collapses "device reports not-alive" and "the query failed" into a
+    /// single `false`, this distinguishes a **definitively gone** device from a
+    /// **transient** HAL hiccup under load.
+    ///
+    /// This matters because the audio engine tears a tap down and recreates it
+    /// when it looks dead. Under heavy CPU/memory load the `coreaudiod` IPC can
+    /// return a transient error for a perfectly healthy aggregate — and treating
+    /// that as "dead" causes a recreate storm that cuts audio every ~0.5–1 s.
+    /// Only a `kAudioHardwareBadObjectError`/`BadDeviceError` (the object no
+    /// longer exists — exactly what a `coreaudiod` restart produces) is treated
+    /// as definitively gone.
+    enum DeviceLiveness {
+        case alive
+        case dead       // definitively gone (object no longer exists)
+        case unknown    // transient query failure — caller should assume alive
+    }
+
+    func deviceLiveness() -> DeviceLiveness {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var isAlive: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(self, &address, 0, nil, &size, &isAlive)
+        switch status {
+        case noErr:
+            return isAlive != 0 ? .alive : .dead
+        case kAudioHardwareBadObjectError, kAudioHardwareBadDeviceError:
+            return .dead
+        default:
+            return .unknown
+        }
+    }
+
     /// Wait for an audio device to become ready, processing HAL events via CFRunLoop.
     /// - Parameters:
     ///   - timeout: Maximum time to wait in seconds (default: 1.0)

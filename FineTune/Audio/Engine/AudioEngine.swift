@@ -51,8 +51,34 @@ final class AudioEngine {
     /// every in-flight task in one call — no more forgotten orphans.
     let taskScheduler = AudioTaskScheduler()
     var tapRecoveryCooldownUntil: [pid_t: Date] = [:]  // Prevents tap recreation thrashing
+    /// PIDs whose tap is mid-recreation. During `recreateTap`'s async teardown
+    /// window `taps[pid]` is briefly nil, so a concurrently-running self-heal
+    /// (`applyPersistedSettings` → `ensureTap*`) could create a *second* tap that
+    /// `recreateTap` then overwrites — leaking the duplicate's aggregate device.
+    /// `ensureTap*` skip PIDs in this set to close that race. `@ObservationIgnored`
+    /// — pure coordination state, never observed by the UI.
+    @ObservationIgnored var pidsBeingRecreated: Set<pid_t> = []
     var diagnostics = AudioEngineDiagnostics()
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "AudioEngine")
+
+    // MARK: - System-pressure resilience (see AudioEngine+Resilience.swift)
+
+    /// Memory-pressure source: proactively revalidates tap liveness and sheds DSP
+    /// load when the system is thrashing (the scenario that freezes the app and
+    /// kills `coreaudiod`, leaving taps dead). `@ObservationIgnored` — pure infra,
+    /// never observed by the UI.
+    @ObservationIgnored var memoryPressureSource: DispatchSourceMemoryPressure?
+    /// System-wake observer token. Wake from sleep loses audio state much like an
+    /// overload does, so we revalidate taps on wake too.
+    @ObservationIgnored var wakeObserver: NSObjectProtocol?
+    /// App-activation observer token. Revalidates tap liveness when the user
+    /// brings FineTune to the foreground — a cheap "make sure audio is healthy
+    /// right now" trigger.
+    @ObservationIgnored var didBecomeActiveObserver: NSObjectProtocol?
+    /// Whether per-callback DSP is currently being shed across all taps under
+    /// critical memory pressure. Tracked so we toggle (and re-apply to new taps)
+    /// exactly once per transition.
+    @ObservationIgnored var isDSPLoadShed = false
 
     // MARK: - Priority State Machine
 
@@ -182,6 +208,15 @@ final class AudioEngine {
             Task { @MainActor in
                 if self.permission.status == .authorized {
                     self.processMonitor.start()
+                    // CRITICAL: previously the tap health monitor only started via
+                    // observePermissionGranted(), which is wired ONLY when permission
+                    // is NOT yet authorized at launch (see below). On every relaunch
+                    // with audio capture already granted — the normal day-to-day case —
+                    // the health monitor, self-heal, and all automatic tap recovery
+                    // never started, so a tap killed by a system overload / coreaudiod
+                    // restart was never rebuilt ("freezes and comes back without audio").
+                    // Start it here so recovery is always armed when authorized.
+                    self.startHealthMonitor()
                 }
                 self.deviceMonitor.start()
 
@@ -310,6 +345,14 @@ final class AudioEngine {
             self?.handleInputDeviceConnected(deviceUID, name: deviceName)
         }
 
+        // Any device-list change (including a coreaudiod restart that destroys our
+        // private aggregates without a clean per-device disconnect) revalidates
+        // tap liveness. recreateDeadTaps() respects the per-PID cooldown and the
+        // HDMI/display-sleep guard, so this is safe to fire on every change.
+        deviceMonitor.onDeviceListChanged = { [weak self] in
+            self?.scheduleLivenessRevalidation()
+        }
+
         deviceVolumeMonitor.onDefaultDeviceChanged = { [weak self] newDefaultUID in
             self?.handleDefaultDeviceChanged(newDefaultUID)
         }
@@ -347,6 +390,7 @@ final class AudioEngine {
 
     func stop() {
         stopHealthMonitor()
+        stopResilienceObservers()
         processMonitor.stop()
         deviceMonitor.stop()
         for tap in taps.values {

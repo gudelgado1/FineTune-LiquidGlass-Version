@@ -77,6 +77,13 @@ final class ProcessTapController: ProcessTapControlling {
     /// Set once any audio callback has rendered at least one buffer.
     private nonisolated(unsafe) var _hasRenderedAudio: Bool = false
 
+    /// When true, the audio callback skips the EQ / AutoEQ / loudness DSP stage
+    /// to shed CPU under memory/CPU pressure (set via `setDSPBypass`). The gain
+    /// ramp, channel mapping, mute, and metering still run — only the optional
+    /// effects are dropped, so audio keeps flowing (just unprocessed) while the
+    /// system is thrashing instead of risking an IO-thread overload/dropout.
+    private nonisolated(unsafe) var _dspBypass: Bool = false
+
     /// Callback role identification — RT-safe via atomic UInt32 reads.
     /// Each IO proc closure captures an immutable callbackID at creation.
     /// The callback compares against these to determine primary/secondary role.
@@ -190,6 +197,35 @@ final class ProcessTapController: ProcessTapControlling {
         guard started != 0 else { return false }
         let deltaNanos = Double(mach_absolute_time() &- started) * Self.hostTimeNanosScale
         return deltaNanos >= (minActiveSeconds * 1_000_000_000.0)
+    }
+
+    /// Direct check that the server-side aggregate device still exists. Used by
+    /// the liveness watchdog to detect taps killed wholesale by a `coreaudiod`
+    /// restart (memory pressure / HAL reset), which the callback-timing checks
+    /// can't distinguish from a normally paused app.
+    ///
+    /// In-transition taps (mid device-switch, crossfade, or teardown) report
+    /// `true` so the watchdog never fights an in-progress transition — the
+    /// aggregate device ID is briefly replaced during those windows.
+    ///
+    /// Reports dead ONLY on a definitive "object gone" signal. A transient HAL
+    /// failure under load returns `.unknown`, which we treat as alive — otherwise
+    /// a healthy tap gets torn down and recreated on every load spike, cutting
+    /// audio in a ~0.5–1 s recreate loop.
+    var isResourceAlive: Bool {
+        guard activated, !isSwitching, !_invalidating else { return true }
+        guard primaryResources.aggregateDeviceID.isValid else { return false }
+        switch primaryResources.aggregateDeviceID.deviceLiveness() {
+        case .alive, .unknown:
+            return true
+        case .dead:
+            return false
+        }
+    }
+
+    /// Toggles the per-callback DSP bypass (RT-safe atomic Bool write).
+    func setDSPBypass(_ bypass: Bool) {
+        _dspBypass = bypass
     }
 
     var currentDeviceVolume: Float {
@@ -1186,6 +1222,10 @@ final class ProcessTapController: ProcessTapControlling {
         }
 
         let targetVol = _volume
+        // Load-shedding: when set (critical memory pressure), drop the optional
+        // DSP stage entirely. Read once so both the assignments below and the
+        // crossfade roles see a consistent value for this callback.
+        let dspBypass = _dspBypass
         var currentVol: Float
         let crossfadeMultiplier: Float
         let rampCoeff: Float
@@ -1205,10 +1245,10 @@ final class ProcessTapController: ProcessTapControlling {
             rampCoeff = rampCoefficient
             stereoLeft = _primaryPreferredStereoLeftChannel
             stereoRight = _primaryPreferredStereoRightChannel
-            eqProc = eqProcessor
-            autoEQProc = autoEQProcessor
-            loudnessEqualizerProc = loudnessEqualizerProcessor
-            loudnessCompensatorProc = loudnessCompensator
+            eqProc = dspBypass ? nil : eqProcessor
+            autoEQProc = dspBypass ? nil : autoEQProcessor
+            loudnessEqualizerProc = dspBypass ? nil : loudnessEqualizerProcessor
+            loudnessCompensatorProc = dspBypass ? nil : loudnessCompensator
         } else {
             currentVol = _secondaryCurrentVolume
             // Secondary uses sine curve (0→1).
@@ -1217,10 +1257,10 @@ final class ProcessTapController: ProcessTapControlling {
             rampCoeff = secondaryRampCoefficient
             stereoLeft = _secondaryPreferredStereoLeftChannel
             stereoRight = _secondaryPreferredStereoRightChannel
-            eqProc = secondaryEQProcessor
-            autoEQProc = secondaryAutoEQProcessor
-            loudnessEqualizerProc = secondaryLoudnessEqualizerProcessor
-            loudnessCompensatorProc = secondaryLoudnessCompensator
+            eqProc = dspBypass ? nil : secondaryEQProcessor
+            autoEQProc = dspBypass ? nil : secondaryAutoEQProcessor
+            loudnessEqualizerProc = dspBypass ? nil : secondaryLoudnessEqualizerProcessor
+            loudnessCompensatorProc = dspBypass ? nil : secondaryLoudnessCompensator
         }
 
         Self.processMappedBuffers(

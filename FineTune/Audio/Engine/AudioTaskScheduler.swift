@@ -56,6 +56,16 @@ extension AudioTaskID {
     /// Stale-cleanup periodic check.
     static let staleCleanup = AudioTaskID("audio.staleCleanup")
 
+    /// Debounced tap-liveness revalidation. Coalesces bursts of triggers
+    /// (memory-pressure storms, device-list churn, wake/foreground) into one
+    /// pass so we don't hammer the HAL — and the engine — under load.
+    static let livenessRevalidate = AudioTaskID("audio.livenessRevalidate")
+
+    /// Post-wake settle + full rebuild of active taps. Aggregate devices can
+    /// survive standby as "zombies" (alive but not delivering audio), which no
+    /// cheap check detects, so we rebuild them after a settle delay.
+    static let wakeRebuild = AudioTaskID("audio.wakeRebuild")
+
     /// Bluetooth confirmation timeout (one per device MAC).
     static func bluetoothConfirm(mac: String) -> AudioTaskID {
         AudioTaskID("audio.bluetoothConfirm.\(mac)")

@@ -38,6 +38,9 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
     /// Called when an input device appears (passes UID and name)
     var onInputDeviceConnected: ((_ uid: String, _ name: String) -> Void)?
 
+    /// Called once after every debounced device-list change (see protocol doc).
+    var onDeviceListChanged: (() -> Void)?
+
     /// Returns current output device priority order (highest priority first) for deterministic callback ordering
     var outputPriorityOrder: (() -> [String])?
 
@@ -331,6 +334,12 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
                 onInputDeviceConnected?(uid, device.name)
             }
         }
+
+        // Always notify, even when no real input/output device changed: a
+        // coreaudiod restart destroys our private aggregate devices and surfaces
+        // as a bare device-list change (no per-device disconnect), so this is the
+        // hook that lets the engine revalidate tap liveness in that case.
+        onDeviceListChanged?()
     }
 
 }

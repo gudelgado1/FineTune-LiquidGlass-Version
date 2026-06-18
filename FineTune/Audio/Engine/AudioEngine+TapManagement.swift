@@ -54,6 +54,7 @@ extension AudioEngine {
     func ensureTapWithDevices(for app: AudioApp, deviceUIDs: [String]) {
         guard !deviceUIDs.isEmpty else { return }
         guard taps[app.id] == nil else { return }
+        guard !pidsBeingRecreated.contains(app.id) else { return }  // recreation in flight
         guard permission.status == .authorized else { return }
 
         let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: deviceUIDs, isFollowsDefault: followsDefault.contains(app.id))
@@ -63,6 +64,9 @@ extension AudioEngine {
 
             try tap.activate()
             taps[app.id] = tap
+            // A tap created while load-shedding is active must start bypassed too,
+            // otherwise a tap recreated mid-pressure would re-introduce DSP cost.
+            if isDSPLoadShed { tap.setDSPBypass(true) }
 
             // Load and apply persisted EQ settings
             let eqSettings = settingsManager.getEQSettings(for: app.persistenceIdentifier)
@@ -85,6 +89,7 @@ extension AudioEngine {
     }
     func ensureTapExists(for app: AudioApp, deviceUID: String) {
         guard taps[app.id] == nil else { return }
+        guard !pidsBeingRecreated.contains(app.id) else { return }  // recreation in flight
         guard permission.status == .authorized else { return }
 
         let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: [deviceUID], isFollowsDefault: followsDefault.contains(app.id))
@@ -94,6 +99,9 @@ extension AudioEngine {
 
             try tap.activate()
             taps[app.id] = tap
+            // A tap created while load-shedding is active must start bypassed too,
+            // otherwise a tap recreated mid-pressure would re-introduce DSP cost.
+            if isDSPLoadShed { tap.setDSPBypass(true) }
 
             // Load and apply persisted EQ settings
             let eqSettings = settingsManager.getEQSettings(for: app.persistenceIdentifier)
@@ -223,6 +231,10 @@ extension AudioEngine {
     /// state lives only as long as the scheduled task — re-starting the monitor
     /// resets the miss counts cleanly.
     func startHealthMonitor() {
+        // Arm the off-main proactive triggers (memory pressure / wake) alongside
+        // the periodic monitor. Idempotent — safe to call from both the init path
+        // and observePermissionGranted().
+        startResilienceObservers()
         guard !taskScheduler.activeIDs.contains(.healthMonitor) else { return }
         // `consecutiveMisses` lives outside the closure so successive ticks
         // share state; the closure captures it by reference. The scheduler
@@ -249,6 +261,15 @@ extension AudioEngine {
                 self.logger.debug("Health self-heal: \(appsMissingTaps.count) active app(s) missing a tap — re-applying")
                 self.applyPersistedSettings()
             }
+
+            // Liveness pass: recreate any tap whose server-side aggregate device
+            // was destroyed wholesale (coreaudiod restart under memory pressure,
+            // HAL reset, system overload). This is a *direct* resource check, so —
+            // unlike the callback-timing checks below — it also catches taps that
+            // died before ever rendering a buffer (which `isHealthCheckEligible`
+            // would otherwise skip forever). The HDMI/display-sleep guard lives
+            // inside recreateDeadTaps().
+            await self.recreateDeadTaps()
 
             // Skip the per-tap responsiveness check when no taps exist (#176)
             guard !self.taps.isEmpty else { return }
@@ -304,6 +325,11 @@ extension AudioEngine {
     /// to prevent orphaned IO procs from accumulating (issue #176).
     func recreateTap(for pid: pid_t) async {
         guard let oldTap = taps.removeValue(forKey: pid) else { return }
+        // Mark in-flight so a concurrent self-heal/ensureTap doesn't create a
+        // duplicate tap during the async teardown window below (taps[pid] is nil
+        // until we reinsert). Cleared on every exit path.
+        pidsBeingRecreated.insert(pid)
+        defer { pidsBeingRecreated.remove(pid) }
         let deviceUIDs = oldTap.currentDeviceUIDs
         let previousSourceUID = oldTap.tapSourceDeviceUID
         recordTapRecoveryAttempt(pid: pid)
@@ -330,6 +356,9 @@ extension AudioEngine {
             applyTapOutputState(to: tap, for: app.id, deviceUIDs: deviceUIDs)
             try tap.activate()
             taps[app.id] = tap
+            // A tap created while load-shedding is active must start bypassed too,
+            // otherwise a tap recreated mid-pressure would re-introduce DSP cost.
+            if isDSPLoadShed { tap.setDSPBypass(true) }
 
             let eqSettings = settingsManager.getEQSettings(for: app.persistenceIdentifier)
             tap.updateEQSettings(eqSettings)

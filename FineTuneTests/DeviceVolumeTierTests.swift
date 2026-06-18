@@ -117,6 +117,7 @@ final class MockAudioDeviceMonitor: AudioDeviceProviding {
     var onDeviceConnected: ((_ uid: String, _ name: String) -> Void)?
     var onInputDeviceDisconnected: ((_ uid: String, _ name: String) -> Void)?
     var onInputDeviceConnected: ((_ uid: String, _ name: String) -> Void)?
+    var onDeviceListChanged: (() -> Void)?
 
     private var devicesByUID: [String: AudioDevice] = [:]
     private var devicesByID: [AudioDeviceID: AudioDevice] = [:]
