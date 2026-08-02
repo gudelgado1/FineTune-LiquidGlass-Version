@@ -24,6 +24,15 @@ private func crashSignalHandler(_ sig: Int32) {
     // Reset to default FIRST to prevent infinite recursion if cleanup itself crashes
     signal(sig, SIG_DFL)
 
+    // Hard deadline on the cleanup below. `AudioHardwareDestroyAggregateDevice`
+    // is a synchronous IPC to `coreaudiod`; when that daemon is wedged it NEVER
+    // returns, so this handler would hang and the process could not be quit at
+    // all (observed 2026-07-29 — only SIGKILL worked). `alarm` + a SIG_DFL
+    // SIGALRM guarantees the process still dies, cleanup or not.
+    // Both calls are async-signal-safe.
+    signal(SIGALRM, SIG_DFL)
+    alarm(5)
+
     if let slots = gDeviceSlots {
         let n = Int(gDeviceCount)
         for i in 0..<n {
@@ -33,6 +42,10 @@ private func crashSignalHandler(_ sig: Int32) {
             }
         }
     }
+
+    // Cleanup finished in time — cancel the watchdog before re-raising so the
+    // real signal (and its crash report) is what terminates us.
+    alarm(0)
 
     // Re-raise with default handler for normal crash behavior (crash report, core dump)
     raise(sig)

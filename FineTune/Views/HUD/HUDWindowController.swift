@@ -24,6 +24,11 @@ final class HUDWindowController {
     private var hostingView: NSHostingView<AnyView>?
     private var hideTask: Task<Void, Never>?
     private var styleAtLastShow: HUDStyle = .tahoe
+    /// Invalidates in-flight fade-out completions. A `show()` that arrives during
+    /// the ~110 ms fade-out bumps this; the stale fade's completion handler then
+    /// must NOT `orderOut` the panel it just re-presented (the panel would vanish
+    /// mid-interaction and ignore further volume keys until the next show).
+    private var hideAnimationGeneration = 0
 
     /// Slider fraction in [0, 1]. The wiring site converts to gain using the current device's tier.
     var volumeWriter: ((Double) -> Void)?
@@ -152,6 +157,9 @@ final class HUDWindowController {
         panel.setFrameOrigin(position(for: style, size: size))
 
         if panel.isVisible {
+            // Possibly mid fade-out: neutralize it or the panel gets ordered out
+            // (and left at alpha ~0) right after this show.
+            cancelHideAnimation(for: panel)
             panel.makeKeyAndOrderFront(nil)
         } else {
             panel.alphaValue = 0
@@ -244,6 +252,9 @@ final class HUDWindowController {
         panel.setFrameOrigin(position(for: .tahoe, size: size))
 
         if panel.isVisible {
+            // Possibly mid fade-out: neutralize it or the panel gets ordered out
+            // (and left at alpha ~0) right after this show.
+            cancelHideAnimation(for: panel)
             panel.makeKeyAndOrderFront(nil)
         } else {
             panel.alphaValue = 0
@@ -276,14 +287,35 @@ final class HUDWindowController {
         hideTask?.cancel()
         hideTask = nil
         guard let panel, panel.isVisible else { return }
+        let generation = hideAnimationGeneration
         let duration = reduceMotionEnabled() ? 0.08 : 0.11
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = duration
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().alphaValue = 0.0
-        }, completionHandler: {
-            panel.orderOut(nil)
+        }, completionHandler: { [weak self] in
+            // AppKit runs this on the main thread, but the closure isn't typed
+            // as main-actor — assume the isolation rather than hopping, so the
+            // check and the orderOut stay in the same runloop turn as the fade.
+            MainActor.assumeIsolated {
+                // A show() during the fade bumps the generation — this fade is
+                // stale and must not order out the panel show() just re-presented.
+                guard let self, self.hideAnimationGeneration == generation else { return }
+                panel.orderOut(nil)
+            }
         })
+    }
+
+    /// Cancels any in-flight fade-out so a re-show doesn't get ordered out from
+    /// under it: bumps the generation (stale completions become no-ops) and
+    /// retargets the alpha animation to 1 immediately (a plain property write
+    /// would be overwritten by the still-running animator ticks).
+    private func cancelHideAnimation(for panel: NSPanel) {
+        hideAnimationGeneration += 1
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            panel.animator().alphaValue = 1.0
+        }
     }
 
     // MARK: - Position Math

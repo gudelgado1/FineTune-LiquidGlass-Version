@@ -55,7 +55,15 @@ extension AudioEngine {
         guard !deviceUIDs.isEmpty else { return }
         guard taps[app.id] == nil else { return }
         guard !pidsBeingRecreated.contains(app.id) else { return }  // recreation in flight
+        guard !pidsBeingCreated.contains(app.id) else { return }  // creation in flight (nested run loop re-entry)
         guard permission.status == .authorized else { return }
+
+        // activate() below pumps a nested run loop (waitUntilReady), which can
+        // re-enter this method for the same pid via the health monitor or
+        // onAppsChanged before `taps[app.id]` is set — creating a duplicate tap
+        // whose aggregate device leaks. Mark creation in flight for the window.
+        pidsBeingCreated.insert(app.id)
+        defer { pidsBeingCreated.remove(app.id) }
 
         let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: deviceUIDs, isFollowsDefault: followsDefault.contains(app.id))
         do {
@@ -90,7 +98,13 @@ extension AudioEngine {
     func ensureTapExists(for app: AudioApp, deviceUID: String) {
         guard taps[app.id] == nil else { return }
         guard !pidsBeingRecreated.contains(app.id) else { return }  // recreation in flight
+        guard !pidsBeingCreated.contains(app.id) else { return }  // creation in flight (nested run loop re-entry)
         guard permission.status == .authorized else { return }
+
+        // Same nested-run-loop guard as ensureTapWithDevices: activate() can
+        // re-enter tap creation for this pid before the tap lands in `taps`.
+        pidsBeingCreated.insert(app.id)
+        defer { pidsBeingCreated.remove(app.id) }
 
         let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: [deviceUID], isFollowsDefault: followsDefault.contains(app.id))
         do {
@@ -117,9 +131,11 @@ extension AudioEngine {
             )
 
             logger.debug("Created tap for \(app.name)")
+            DiagnosticLog.log("tap: created for \(app.name)#\(app.id) on \(deviceUID)")
         } catch {
             recordTapCreationFailure()
             logger.error("Failed to create tap for \(app.name): \(error.localizedDescription)")
+            DiagnosticLog.log("tap: CREATE FAILED for \(app.name)#\(app.id) on \(deviceUID): \(error.localizedDescription)")
         }
     }
 
@@ -139,7 +155,7 @@ extension AudioEngine {
         // onset volume bump that a freshly-recreated tap produces (the app would
         // otherwise play at full volume for the moment before the new tap activates).
         // Only processes whose audio objects have disappeared are torn down.
-        let liveObjectIDs = Set((try? AudioObjectID.readProcessList()) ?? [])
+        let liveObjectIDs = liveProcessObjectIDs()
         let pausedPIDs = stalePIDs.filter { pid in
             guard let tap = taps[pid] else { return false }
             let objs = tap.app.processObjectIDs
@@ -185,7 +201,7 @@ extension AudioEngine {
                 // objects are still registered must keep its warm tap (re-check the
                 // HAL list, since the app may have paused — not quit — since scheduling).
                 let currentPIDs = Set(self.apps.map { $0.id })
-                let stillLive = Set((try? AudioObjectID.readProcessList()) ?? [])
+                let stillLive = self.liveProcessObjectIDs()
                 let stillAlive = self.taps[pid]?.app.processObjectIDs.contains(where: stillLive.contains) ?? false
                 guard !currentPIDs.contains(pid), !stillAlive else {
                     self.pendingCleanup.removeValue(forKey: pid)
@@ -196,6 +212,7 @@ extension AudioEngine {
                 if let tap = self.taps.removeValue(forKey: pid) {
                     tap.invalidate()
                     self.logger.debug("Cleaned up stale tap for PID \(pid)")
+                    DiagnosticLog.log("cleanup: pid=\(pid) app quit — tap torn down")
                 }
                 self.appDeviceRouting.removeValue(forKey: pid)
                 self.followsDefault.remove(pid)
@@ -241,8 +258,24 @@ extension AudioEngine {
         // owns the loop — restarting via stopHealthMonitor() + startHealthMonitor()
         // gives a fresh closure and a fresh miss map.
         var consecutiveMisses: [pid_t: Int] = [:]
+        var tickCount = 0
         taskScheduler.scheduleRepeating(.healthMonitor, every: .seconds(2)) { [weak self] in
             guard let self else { return }
+
+            // Stand down while the audio system is unresponsive. Tap creation and
+            // liveness queries are all blocking HAL IPC; ticking through them
+            // every 2 s against a wedged daemon strands a thread per attempt and
+            // buys nothing — AudioSystemHealth owns recovery from here.
+            guard self.audioSystemHealth.allowsPeriodicHALWork else { return }
+
+            // Heartbeat every ~5 min (150 × 2 s ticks). Gaps between heartbeat
+            // timestamps in the diagnostic log expose process throttling /
+            // App Nap during unattended periods (display asleep) — the prime
+            // suspect when the whole machine goes silent and never recovers.
+            tickCount += 1
+            if tickCount % 150 == 1 {
+                DiagnosticLog.log("health: heartbeat tick=\(tickCount) taps=\(self.taps.count) activeApps=\(self.apps.count)")
+            }
 
             // Self-heal: an actively-streaming app with no tap is otherwise never
             // retried. `applyPersistedSettings()` only runs on app-list changes, and
@@ -259,6 +292,7 @@ extension AudioEngine {
                 // Drop any stale "applied" mark so applyPersistedSettings retries them.
                 for app in appsMissingTaps { self.appliedPIDs.remove(app.id) }
                 self.logger.debug("Health self-heal: \(appsMissingTaps.count) active app(s) missing a tap — re-applying")
+                DiagnosticLog.log("health: self-heal — \(appsMissingTaps.count) active app(s) missing a tap: \(appsMissingTaps.map { "\($0.name)#\($0.id)" })")
                 self.applyPersistedSettings()
             }
 
@@ -288,12 +322,14 @@ extension AudioEngine {
                 guard tap.isHealthCheckEligible(minActiveSeconds: 5.0) else { continue }
 
                 // Only health-check apps that are actively streaming (isRunning=true).
-                // Paused apps have no callbacks, which is normal — not a health signal.
+                // Paused apps have no NEW misses while paused — but do NOT reset the
+                // counter here: a post-standby zombie tap only misses while the app
+                // plays, and the user's natural pause/play retries used to zero the
+                // count each time, so 3 consecutive misses were never reached and the
+                // dead tap kept muting the app forever. Freezing the count across
+                // pauses lets recovery finish on the next play.
                 let isActivelyStreaming = self.processMonitor.activeApps.contains { $0.id == pid }
-                guard isActivelyStreaming else {
-                    consecutiveMisses[pid] = 0
-                    continue
-                }
+                guard isActivelyStreaming else { continue }
 
                 if tap.hasRecentAudioCallback(within: 3.0) {
                     consecutiveMisses[pid] = 0
@@ -301,6 +337,7 @@ extension AudioEngine {
                     let misses = (consecutiveMisses[pid] ?? 0) + 1
                     consecutiveMisses[pid] = misses
                     self.recordHealthCheckMiss(pid: pid)
+                    DiagnosticLog.log("health: pid=\(pid) callback miss \(misses)/3")
 
                     if misses >= 3 {
                         self.logger.warning("Tap for PID \(pid) unresponsive (\(misses) misses), recreating")
@@ -333,11 +370,24 @@ extension AudioEngine {
         let deviceUIDs = oldTap.currentDeviceUIDs
         let previousSourceUID = oldTap.tapSourceDeviceUID
         recordTapRecoveryAttempt(pid: pid)
+        DiagnosticLog.log("recreate: pid=\(pid) app=\(oldTap.app.name) devices=\(deviceUIDs) — tearing down old tap")
         await oldTap.invalidateAsync()
 
-        // Find the current AudioApp entry for this PID
-        guard let app = apps.first(where: { $0.id == pid }) else {
+        // Find the current AudioApp entry for this PID. A *paused* app is absent
+        // from `apps` (kAudioProcessPropertyIsRunning is false) but its audio
+        // process objects stay registered with the HAL until it quits — the same
+        // distinction cleanupStaleTaps uses to keep its tap warm. Recreate from
+        // the old tap's app snapshot in that case, so a paused app's dead/zombie
+        // tap is rebuilt warm instead of silently muting the app on resume.
+        let app: AudioApp
+        if let activeApp = apps.first(where: { $0.id == pid }) {
+            app = activeApp
+        } else if !oldTap.app.processObjectIDs.isEmpty,
+                  !liveProcessObjectIDs().isDisjoint(with: oldTap.app.processObjectIDs) {
+            app = oldTap.app
+        } else {
             logger.debug("No active app for PID \(pid), skipping tap recreation")
+            DiagnosticLog.log("recreate: pid=\(pid) app gone (not active, no live process objects) — dropping tap")
             appliedPIDs.remove(pid)
             tapRecoveryCooldownUntil[pid] = Date().addingTimeInterval(12)
             recordTapRecoveryResult(pid: pid, succeeded: false)
@@ -378,11 +428,13 @@ extension AudioEngine {
             appliedPIDs.insert(pid)
             tapRecoveryCooldownUntil[pid] = Date().addingTimeInterval(20)
             recordTapRecoveryResult(pid: pid, succeeded: true)
+            DiagnosticLog.log("recreate: pid=\(pid) app=\(app.name) SUCCESS")
         } catch {
             tapRecoveryCooldownUntil[pid] = Date().addingTimeInterval(12)
             recordTapCreationFailure()
             recordTapRecoveryResult(pid: pid, succeeded: false)
             logger.error("Failed to recreate tap for \(app.name): \(error.localizedDescription)")
+            DiagnosticLog.log("recreate: pid=\(pid) app=\(app.name) FAILED: \(error.localizedDescription)")
             return
         }
 

@@ -43,6 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 @main
 struct FineTuneApp: App {
+    /// Process-lifetime activity token that opts FineTune out of App Nap /
+    /// App Sleep (see init). Held forever by design — never end it.
+    private static var appNapActivity: NSObjectProtocol?
+
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var audioEngine: AudioEngine
     @State private var accessibility: AccessibilityPermissionService
@@ -157,6 +161,20 @@ struct FineTuneApp: App {
         CrashGuard.install()
         // Destroy any orphaned aggregate devices from previous crashes
         OrphanedTapCleanup.destroyOrphanedDevices()
+
+        // NEVER let macOS App Nap / App Sleep this process. Every audio app is
+        // tapped with `.mutedWhenTapped` and FineTune's own IO blocks render the
+        // replacement audio — a napped/throttled FineTune therefore mutes the
+        // ENTIRE machine (menu bar app + display asleep + no windows is exactly
+        // the App Nap profile). `AllowingIdleSystemSleep` keeps normal system
+        // power behavior; only process-level throttling is prevented.
+        Self.appNapActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "System-wide per-app audio processing"
+        )
+
+        let bundleVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        DiagnosticLog.log("=== FineTune launched (v\(bundleVersion)) — App Nap disabled ===")
 
         let settings = SettingsManager()
         let profileManager = AutoEQProfileManager()
@@ -307,6 +325,7 @@ struct FineTuneApp: App {
             queue: .main
         ) { [settings, monitor, accessibilityService, hud, coordinator] _ in
             MainActor.assumeIsolated {
+                DiagnosticLog.log("=== willTerminate: graceful quit (orphan sweep + teardown) ===")
                 // Synchronously destroy this instance's aggregate devices BEFORE the
                 // process exits. CoreAudio aggregate devices are system-wide and
                 // survive process death, so a normal quit would otherwise LEAK them —

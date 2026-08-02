@@ -28,6 +28,13 @@ final class AudioEngine {
     /// Closure to check if a device is alive. Overridable for testing.
     let isAliveCheck: (AudioDeviceID) -> Bool
 
+    /// Whether a device's audio dies with the display (DisplayPort/HDMI).
+    /// Overridable for testing. Used by the screens-wake force rebuild: a
+    /// monitor's audio device can revive after display sleep as a zombie whose
+    /// IO proc keeps firing while output goes nowhere — invisible to both the
+    /// callback-timing checks and the aggregate-liveness watchdog.
+    let isDisplayTransport: (AudioDeviceID) -> Bool
+
     /// One-shot HAL listeners for devices that were present but not alive during priority resolution.
     /// Keyed by AudioDeviceID. Each entry holds the device UID, listener block, and a timeout task.
     var aliveWatchers: [AudioDeviceID: (uid: String, block: AudioObjectPropertyListenerBlock, timeout: Task<Void, Never>)] = [:]
@@ -58,6 +65,18 @@ final class AudioEngine {
     /// `ensureTap*` skip PIDs in this set to close that race. `@ObservationIgnored`
     /// — pure coordination state, never observed by the UI.
     @ObservationIgnored var pidsBeingRecreated: Set<pid_t> = []
+    /// PIDs whose *initial* tap creation is in flight. `activate()` blocks the
+    /// main thread in `waitUntilReady`, which pumps a nested run loop to process
+    /// HAL events — and a nested run loop also drains the main queue, so a
+    /// health-monitor tick or `onAppsChanged` callback can re-enter
+    /// `applyPersistedSettings` → `ensureTap*` for the SAME pid before the first
+    /// tap lands in `taps`. Without this guard that created a duplicate tap whose
+    /// aggregate device leaked. Mirror of `pidsBeingRecreated` for creation.
+    @ObservationIgnored var pidsBeingCreated: Set<pid_t> = []
+    /// Reads the HAL's registered audio process objects. Injectable for tests.
+    /// Used to distinguish a *paused* app (process objects still registered)
+    /// from a *quit* app in warm-tap retention and post-wake recovery.
+    let liveProcessObjectIDs: () -> Set<AudioObjectID>
     var diagnostics = AudioEngineDiagnostics()
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "AudioEngine")
 
@@ -71,6 +90,11 @@ final class AudioEngine {
     /// System-wake observer token. Wake from sleep loses audio state much like an
     /// overload does, so we revalidate taps on wake too.
     @ObservationIgnored var wakeObserver: NSObjectProtocol?
+    /// Screens-wake observer token. Desktops held awake by power assertions
+    /// NEVER post `didWakeNotification` — the machine only display-sleeps. But
+    /// display sleep still kills DisplayPort/HDMI audio, so `screensDidWake` is
+    /// the recovery trigger that actually fires on those machines.
+    @ObservationIgnored var screensWakeObserver: NSObjectProtocol?
     /// App-activation observer token. Revalidates tap liveness when the user
     /// brings FineTune to the foreground — a cheap "make sure audio is healthy
     /// right now" trigger.
@@ -79,6 +103,12 @@ final class AudioEngine {
     /// critical memory pressure. Tracked so we toggle (and re-apply to new taps)
     /// exactly once per transition.
     @ObservationIgnored var isDSPLoadShed = false
+
+    /// Circuit breaker for a wedged `coreaudiod`. While it reports the audio
+    /// system unresponsive, all periodic HAL work stops: continuing would strand
+    /// a thread per tick in the kernel and (before the off-main refactor) froze
+    /// the app outright. Observed by the UI to explain the silence to the user.
+    let audioSystemHealth = AudioSystemHealth()
 
     // MARK: - Priority State Machine
 
@@ -125,6 +155,8 @@ final class AudioEngine {
         deviceVolumeMonitor: (any DeviceVolumeProviding)? = nil,
         tapFactory: (@MainActor (AudioApp, [String], String?) throws -> any ProcessTapControlling)? = nil,
         isAlive: ((AudioDeviceID) -> Bool)? = nil,
+        liveProcessObjects: (() -> Set<AudioObjectID>)? = nil,
+        isDisplayTransport: ((AudioDeviceID) -> Bool)? = nil,
         startMonitorsAutomatically: Bool = true
     ) {
         self.permission = permission ?? AudioRecordingPermission()
@@ -133,6 +165,11 @@ final class AudioEngine {
         self.autoEQProfileManager = autoEQProfileManager ?? AutoEQProfileManager()
         self.volumeState = VolumeState(settingsManager: manager)
         self.isAliveCheck = isAlive ?? { $0.isDeviceAlive() }
+        self.liveProcessObjectIDs = liveProcessObjects ?? { Set((try? AudioObjectID.readProcessList()) ?? []) }
+        self.isDisplayTransport = isDisplayTransport ?? {
+            let transport = $0.readTransportType()
+            return transport == .displayPort || transport == .hdmi
+        }
 
         // If a custom deviceProvider is given, use it directly.
         // Otherwise create a real AudioDeviceMonitor (needed by DeviceVolumeMonitor and default tap factory).
@@ -204,8 +241,19 @@ final class AudioEngine {
         // Wire callbacks — needed for both test and production mode
         wireCallbacks()
 
+        // The process monitor is the busiest HAL caller, so it both feeds and
+        // obeys the breaker. When the daemon comes back, rebuild everything:
+        // device and process IDs from before the outage are all stale.
+        (processMonitor as? AudioProcessMonitor)?.health = audioSystemHealth
+        audioSystemHealth.onRecovered = { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.resyncAfterCoreAudioRestart()
+            }
+        }
+
         if startMonitorsAutomatically {
             Task { @MainActor in
+                DiagnosticLog.log("engine: monitors starting (capture permission=\(String(describing: self.permission.status)))")
                 if self.permission.status == .authorized {
                     self.processMonitor.start()
                     // CRITICAL: previously the tap health monitor only started via
@@ -325,11 +373,13 @@ final class AudioEngine {
         }
 
         deviceMonitor.onDeviceDisconnected = { [weak self] deviceUID, deviceName in
+            DiagnosticLog.log("device: DISCONNECTED \(deviceName) (\(deviceUID))")
             self?.handleDeviceDisconnected(deviceUID, name: deviceName)
             self?.bluetoothDeviceMonitor.refresh()
         }
 
         deviceMonitor.onDeviceConnected = { [weak self] deviceUID, deviceName in
+            DiagnosticLog.log("device: CONNECTED \(deviceName) (\(deviceUID))")
             self?.handleDeviceConnected(deviceUID, name: deviceName)
             self?.bluetoothDeviceMonitor.notifyDeviceAppearedInCoreAudio()
         }
@@ -354,6 +404,7 @@ final class AudioEngine {
         }
 
         deviceVolumeMonitor.onDefaultDeviceChanged = { [weak self] newDefaultUID in
+            DiagnosticLog.log("device: default output changed → \(newDefaultUID)")
             self?.handleDefaultDeviceChanged(newDefaultUID)
         }
 
@@ -391,6 +442,7 @@ final class AudioEngine {
     func stop() {
         stopHealthMonitor()
         stopResilienceObservers()
+        audioSystemHealth.stop()
         processMonitor.stop()
         deviceMonitor.stop()
         for tap in taps.values {

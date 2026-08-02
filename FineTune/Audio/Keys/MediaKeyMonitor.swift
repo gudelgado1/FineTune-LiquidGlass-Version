@@ -329,7 +329,10 @@ final class MediaKeyMonitor {
             }
             setVolume(deviceID, newVolume)
             if shouldShowHUD {
-                hudController.show(sliderFraction: nextSlider, mute: false, deviceName: deviceName)
+                // A muted device stepping down to 0 STAYS muted (no unmute above)
+                // — the HUD must say so instead of flashing an unmuted speaker.
+                let staysMuted = currentMute && willBeSilent
+                hudController.show(sliderFraction: nextSlider, mute: staysMuted, deviceName: deviceName)
             }
             iconCoordinator?.flashDevice()
 

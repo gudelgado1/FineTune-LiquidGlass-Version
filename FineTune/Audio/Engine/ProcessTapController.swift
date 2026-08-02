@@ -996,6 +996,11 @@ final class ProcessTapController: ProcessTapControlling {
         let deviceUIDs = allDeviceUIDs ?? [primaryDeviceUID]
         let originalVolume = _volume
 
+        // Mark the switch window so the liveness watchdog (isResourceAlive checks
+        // `!isSwitching`) never tears down the tap mid-teardown/rebuild.
+        isSwitching = true
+        defer { isSwitching = false }
+
         _forceSilence = true
         OSMemoryBarrier()
         // LIFE-011: Ensure _forceSilence is always cleared, even if switch throws
@@ -1011,6 +1016,12 @@ final class ProcessTapController: ProcessTapControlling {
 
         _primaryCurrentVolume = 0
         _volume = 0
+        // The ramp below sleeps at every step, and each sleep throws on task
+        // cancellation (a newer switch or invalidate()) — which used to strand
+        // `_volume` at 0 or a fraction of the target, leaving the app near-silent
+        // until the user next touched its slider. Always land on the captured
+        // target; on the success path the loop's final step wrote it anyway.
+        defer { _volume = originalVolume }
 
         // Post-switch settle: shorter when source was already silent (no old audio to drain)
         let settleMs = sourceAlreadySilent ? 80 : 150

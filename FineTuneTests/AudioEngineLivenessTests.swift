@@ -297,6 +297,113 @@ struct AudioEngineLivenessTests {
         #expect(healthy.invalidateAsyncCallCount == 0)
     }
 
+    @Test("wake rebuild recreates a PAUSED app's zombie tap (process objects still registered)")
+    func wakeRebuildRecreatesPausedZombieTap() async {
+        let activeApp = makeApp(pid: 71016)
+        let pausedApp = makeApp(pid: 71017, objectIDs: [990017])
+        let device = makeDevice(id: 716, uid: "spk", name: "Speaker")
+        var replacement: LivenessTap?
+        let harness = makeHarness(
+            app: activeApp,
+            devices: [device],
+            aliveIDs: [device.id],
+            liveProcessObjects: { [AudioObjectID(990017)] }
+        ) { app, uids, _ in
+            let tap = LivenessTap(app: app, deviceUIDs: uids, resourceAlive: true)
+            replacement = tap
+            return tap
+        }
+        // Post-standby zombie of a *paused* app: not in activeApps, but its audio
+        // process objects are still registered (warm tap) and its IO proc stalled.
+        let zombie = LivenessTap(app: pausedApp, deviceUIDs: [device.uid], resourceAlive: true)
+        zombie.recentCallback = false
+        harness.engine.taps[pausedApp.id] = zombie
+
+        await harness.engine.rebuildActiveTapsAfterWake()
+
+        #expect(zombie.invalidateAsyncCallCount == 1)
+        #expect(replacement != nil)
+        #expect(harness.engine.taps[pausedApp.id] === replacement)
+    }
+
+    @Test("wake rebuild leaves a healthy PAUSED warm tap alone (recent callback)")
+    func wakeRebuildSkipsHealthyPausedTap() async {
+        let activeApp = makeApp(pid: 71020)
+        let pausedApp = makeApp(pid: 71021, objectIDs: [990021])
+        let device = makeDevice(id: 720, uid: "spk", name: "Speaker")
+        var factoryCalls = 0
+        let harness = makeHarness(
+            app: activeApp,
+            devices: [device],
+            aliveIDs: [device.id],
+            liveProcessObjects: { [AudioObjectID(990021)] }
+        ) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        // Healthy warm tap: the aggregate keeps clocking during pause, so its IO
+        // proc still fires — must be left alone (no blip on the paused app).
+        let warmTap = LivenessTap(app: pausedApp, deviceUIDs: [device.uid], resourceAlive: true)
+        warmTap.recentCallback = true
+        harness.engine.taps[pausedApp.id] = warmTap
+
+        await harness.engine.rebuildActiveTapsAfterWake()
+
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps[pausedApp.id] === warmTap)
+        #expect(warmTap.invalidateAsyncCallCount == 0)
+    }
+
+    @Test("recreateTap rebuilds a paused-but-alive app's tap from the old tap's snapshot")
+    func recreateTapRebuildsPausedAliveApp() async {
+        let activeApp = makeApp(pid: 71022)
+        let pausedApp = makeApp(pid: 71023, objectIDs: [990023])
+        let device = makeDevice(id: 722, uid: "spk", name: "Speaker")
+        var replacement: LivenessTap?
+        let harness = makeHarness(
+            app: activeApp,
+            devices: [device],
+            aliveIDs: [device.id],
+            liveProcessObjects: { [AudioObjectID(990023)] }
+        ) { app, uids, _ in
+            let tap = LivenessTap(app: app, deviceUIDs: uids, resourceAlive: true)
+            replacement = tap
+            return tap
+        }
+        let dead = LivenessTap(app: pausedApp, deviceUIDs: [device.uid], resourceAlive: false)
+        harness.engine.taps[pausedApp.id] = dead
+
+        await harness.engine.recreateTap(for: pausedApp.id)
+
+        #expect(dead.invalidateAsyncCallCount == 1)
+        #expect(harness.engine.taps[pausedApp.id] === replacement)
+        #expect(replacement?.app.id == pausedApp.id)
+    }
+
+    @Test("recreateTap still gives up when the app quit (no live process objects)")
+    func recreateTapSkipsQuitApp() async {
+        let activeApp = makeApp(pid: 71024)
+        let quitApp = makeApp(pid: 71025, objectIDs: [990025])
+        let device = makeDevice(id: 724, uid: "spk", name: "Speaker")
+        var factoryCalls = 0
+        let harness = makeHarness(
+            app: activeApp,
+            devices: [device],
+            aliveIDs: [device.id],
+            liveProcessObjects: { [] }  // no registered objects → the app is gone
+        ) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        let dead = LivenessTap(app: quitApp, deviceUIDs: [device.uid], resourceAlive: false)
+        harness.engine.taps[quitApp.id] = dead
+
+        await harness.engine.recreateTap(for: quitApp.id)
+
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps[quitApp.id] == nil)
+    }
+
     @Test("wake rebuild leaves inactive (warm/paused) taps alone")
     func wakeRebuildSkipsInactiveTap() async {
         let activeApp = makeApp(pid: 71009)
@@ -313,6 +420,160 @@ struct AudioEngineLivenessTests {
 
         #expect(harness.engine.taps[pausedApp.id] === pausedTap)
         #expect(pausedTap.invalidateAsyncCallCount == 0)
+    }
+
+    // MARK: - Display-wake force rebuild
+
+    @Test("display wake force-rebuilds a display-routed tap even with recent callbacks (invisible zombie)")
+    func displayWakeForceRebuildsDisplayRoutedTap() async {
+        let app = makeApp(pid: 71027)
+        let monitor = makeDevice(id: 727, uid: "dell-dp", name: "DELL U2724DE")
+        var replacement: LivenessTap?
+        let harness = makeHarness(
+            app: app,
+            devices: [monitor],
+            aliveIDs: [monitor.id],
+            displayDeviceIDs: [monitor.id]
+        ) { app, uids, _ in
+            let tap = LivenessTap(app: app, deviceUIDs: uids, resourceAlive: true)
+            replacement = tap
+            return tap
+        }
+        // The worst zombie: aggregate alive AND IO proc still firing, but output
+        // goes nowhere after display sleep. Callback/liveness checks see healthy.
+        let zombie = LivenessTap(app: app, deviceUIDs: [monitor.uid], resourceAlive: true)
+        zombie.recentCallback = true
+        harness.engine.taps[app.id] = zombie
+
+        let forced = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: false)
+
+        #expect(forced == [app.id])
+        #expect(zombie.invalidateAsyncCallCount == 1)
+        #expect(harness.engine.taps[app.id] === replacement)
+    }
+
+    @Test("display wake leaves non-display taps alone")
+    func displayWakeSkipsNonDisplayTap() async {
+        let app = makeApp(pid: 71028)
+        let speaker = makeDevice(id: 728, uid: "spk", name: "Speaker")
+        var factoryCalls = 0
+        let harness = makeHarness(
+            app: app,
+            devices: [speaker],
+            aliveIDs: [speaker.id],
+            displayDeviceIDs: []  // no display-transport devices
+        ) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        let healthy = LivenessTap(app: app, deviceUIDs: [speaker.uid], resourceAlive: true)
+        healthy.recentCallback = true
+        harness.engine.taps[app.id] = healthy
+
+        let forced = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: false)
+
+        #expect(forced.isEmpty)
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps[app.id] === healthy)
+    }
+
+    @Test("display wake second pass respects a fresh recovery cooldown (no double blip)")
+    func displayWakeSecondPassRespectsCooldown() async {
+        let app = makeApp(pid: 71029)
+        let monitor = makeDevice(id: 729, uid: "dell-dp", name: "DELL U2724DE")
+        var factoryCalls = 0
+        let harness = makeHarness(
+            app: app,
+            devices: [monitor],
+            aliveIDs: [monitor.id],
+            displayDeviceIDs: [monitor.id]
+        ) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        let tap = LivenessTap(app: app, deviceUIDs: [monitor.uid], resourceAlive: true)
+        harness.engine.taps[app.id] = tap
+        // Simulate "already force-rebuilt at the 2 s pass" (success cooldown).
+        harness.engine.tapRecoveryCooldownUntil[app.id] = Date().addingTimeInterval(20)
+
+        let forced = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: true)
+
+        #expect(forced.isEmpty)
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps[app.id] === tap)
+    }
+
+    @Test("selective wake sweep skips PIDs just force-rebuilt by the display pass")
+    func wakeSweepSkipsExcludedPIDs() async {
+        let app = makeApp(pid: 71030)
+        let device = makeDevice(id: 730, uid: "spk", name: "Speaker")
+        var factoryCalls = 0
+        let harness = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        // Looks "stuck" (no callbacks yet) — exactly like a tap the display pass
+        // recreated milliseconds ago. Must be skipped when excluded.
+        let fresh = LivenessTap(app: app, deviceUIDs: [device.uid], resourceAlive: true)
+        fresh.recentCallback = false
+        harness.engine.taps[app.id] = fresh
+
+        await harness.engine.rebuildActiveTapsAfterWake(excluding: [app.id])
+
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps[app.id] === fresh)
+    }
+
+    // MARK: - Manual capture rebuild
+
+    @Test("manual rebuild tears down every tap and recreates capture for active apps")
+    func manualRebuildRecreatesTaps() async {
+        let app = makeApp(pid: 71031)
+        let device = makeDevice(id: 731, uid: "spk", name: "Speaker")
+        var created: [LivenessTap] = []
+        let harness = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            let tap = LivenessTap(app: app, deviceUIDs: uids, resourceAlive: true)
+            created.append(tap)
+            return tap
+        }
+        let stale = LivenessTap(app: app, deviceUIDs: [device.uid], resourceAlive: true)
+        harness.engine.taps[app.id] = stale
+        harness.engine.appliedPIDs.insert(app.id)
+        // A cooldown must not block an explicitly user-requested rebuild.
+        harness.engine.tapRecoveryCooldownUntil[app.id] = Date().addingTimeInterval(30)
+
+        let count = await harness.engine.rebuildAllTaps()
+
+        #expect(count == 1)
+        #expect(created.count == 1)
+        #expect(harness.engine.taps[app.id] === created.first)
+        #expect(harness.engine.taps[app.id] !== stale)
+        #expect(harness.engine.tapRecoveryCooldownUntil.isEmpty)
+    }
+
+    @Test("manual rebuild refuses (and changes nothing) while the audio system is unresponsive")
+    func manualRebuildRefusedWhenHALDown() async {
+        let app = makeApp(pid: 71032)
+        let device = makeDevice(id: 732, uid: "spk", name: "Speaker")
+        var factoryCalls = 0
+        let harness = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        let existing = LivenessTap(app: app, deviceUIDs: [device.uid], resourceAlive: true)
+        harness.engine.taps[app.id] = existing
+
+        // Trip the breaker: every step of a rebuild is HAL work, so it must not
+        // run — and must not destroy the taps it can't recreate.
+        harness.engine.audioSystemHealth.reportTimeout()
+        harness.engine.audioSystemHealth.reportTimeout()
+
+        let result = await harness.engine.rebuildAllTaps()
+
+        #expect(result == nil)
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps[app.id] === existing)
+        harness.engine.audioSystemHealth.stop()
     }
 
     // MARK: - Throttling / anti-thrashing
@@ -357,12 +618,39 @@ struct AudioEngineLivenessTests {
         #expect(harness.engine.taps[app.id] != nil)
     }
 
+    @Test("re-entrant creation during the activate window creates no duplicate tap")
+    func nestedCreationReentryCreatesNoDuplicate() {
+        let app = makeApp(pid: 71026)
+        let device = makeDevice(id: 726, uid: "spk", name: "Speaker")
+        var factoryCalls = 0
+        var engineRef: AudioEngine?
+        let harness = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            factoryCalls += 1
+            // Simulate the nested-run-loop re-entry: activate() pumps the main
+            // queue (waitUntilReady), letting a health-monitor tick call back
+            // into ensureTapExists for the SAME pid before taps[pid] is set.
+            // The pidsBeingCreated guard must swallow this inner call.
+            if factoryCalls == 1 {
+                engineRef?.ensureTapExists(for: app, deviceUID: uids[0])
+            }
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        engineRef = harness.engine
+
+        harness.engine.ensureTapExists(for: app, deviceUID: device.uid)
+
+        #expect(factoryCalls == 1)
+        #expect(harness.engine.taps[app.id] != nil)
+    }
+
     // MARK: - Helpers
 
     private func makeHarness(
         app: AudioApp,
         devices: [AudioDevice],
         aliveIDs: Set<AudioDeviceID>,
+        liveProcessObjects: (() -> Set<AudioObjectID>)? = nil,
+        displayDeviceIDs: Set<AudioDeviceID> = [],
         tapFactory: @escaping @MainActor (AudioApp, [String], String?) throws -> any ProcessTapControlling
     ) -> (engine: AudioEngine, deviceMonitor: MockAudioDeviceMonitor) {
         let tempDir = FileManager.default.temporaryDirectory
@@ -387,15 +675,17 @@ struct AudioEngineLivenessTests {
             deviceVolumeMonitor: volume,
             tapFactory: tapFactory,
             isAlive: { aliveIDs.contains($0) },
+            liveProcessObjects: liveProcessObjects,
+            isDisplayTransport: { displayDeviceIDs.contains($0) },
             startMonitorsAutomatically: false
         )
         return (engine, deviceMonitor)
     }
 
-    private func makeApp(pid: pid_t) -> AudioApp {
+    private func makeApp(pid: pid_t, objectIDs: [AudioObjectID] = []) -> AudioApp {
         AudioApp(
             id: pid,
-            processObjectIDs: [],
+            processObjectIDs: objectIDs,
             name: "LivenessTest",
             icon: NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: nil) ?? NSImage(),
             bundleID: "com.finetune.tests.liveness.\(pid)"
