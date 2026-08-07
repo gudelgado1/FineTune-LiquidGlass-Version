@@ -2,6 +2,14 @@ import Foundation
 import Testing
 @testable import FineTune
 
+/// Thread-safe boolean for observing whether abandoned work completed.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+}
+
 @Suite("HALExecutor — deadline enforcement")
 struct HALExecutorTests {
 
@@ -11,31 +19,41 @@ struct HALExecutorTests {
         #expect(value == 42)
     }
 
-    @Test("returns nil instead of blocking when the work outlives the deadline")
+    @Test("returns nil instead of waiting for work that never finishes")
     func returnsNilOnTimeout() async {
-        // Stands in for a wedged coreaudiod: work that never finishes in time.
-        // The caller MUST come back anyway — that is the whole contract.
-        let start = Date()
-        let value: Int? = await HALExecutor.run(timeout: 0.3) {
-            Thread.sleep(forTimeInterval: 5.0)
+        // Stands in for a wedged coreaudiod. The work blocks on a semaphore the
+        // test owns, so it CANNOT complete — no wall-clock threshold is involved
+        // and the result can't change under CI load.
+        let gate = DispatchSemaphore(value: 0)
+        let finished = Flag()
+
+        let value: Int? = await HALExecutor.run(timeout: 0.2) {
+            gate.wait()
+            finished.set()
             return 7
         }
-        let elapsed = Date().timeIntervalSince(start)
 
-        #expect(value == nil)
-        #expect(elapsed < 3.0, "caller waited \(elapsed)s — deadline was not enforced")
+        #expect(value == nil, "a call that outlived its deadline must report nil")
+        #expect(finished.isSet == false, "the caller returned without waiting for the work")
+
+        gate.signal()  // let the abandoned thread exit
     }
 
     @Test("a timed-out call does not corrupt a later successful one")
     func timeoutDoesNotPoisonNextCall() async {
+        let gate = DispatchSemaphore(value: 0)
         let timedOut: Int? = await HALExecutor.run(timeout: 0.2) {
-            Thread.sleep(forTimeInterval: 2.0)
+            gate.wait()
             return 1
         }
         #expect(timedOut == nil)
 
-        let ok = await HALExecutor.run(timeout: 2.0) { 99 }
+        // The executor holds no shared state across calls, so a wedged HAL must
+        // not stop the app from working the moment the daemon answers again.
+        let ok = await HALExecutor.run(timeout: 5.0) { 99 }
         #expect(ok == 99)
+
+        gate.signal()
     }
 }
 

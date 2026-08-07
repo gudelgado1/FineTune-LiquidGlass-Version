@@ -5,20 +5,32 @@ import os
 
 /// HAL-derived facts about one audio process, gathered off the main thread.
 /// `Sendable` so it can cross the executor's thread boundary.
-private struct AudioProcessFacts: Sendable {
+struct AudioProcessFacts: Sendable {
     let objectID: AudioObjectID
     let pid: pid_t
     let bundleID: String?
+
+    init(objectID: AudioObjectID, pid: pid_t, bundleID: String?) {
+        self.objectID = objectID
+        self.pid = pid
+        self.bundleID = bundleID
+    }
 }
 
 /// Result of one off-main enumeration pass.
-private struct ProcessEnumeration: Sendable {
+struct ProcessEnumeration: Sendable {
     let facts: [AudioProcessFacts]
     /// Every process object the HAL reported, for listener bookkeeping.
     let allObjectIDs: [AudioObjectID]
     /// `false` when the process-list read itself failed (distinct from a timeout,
     /// which surfaces as a nil enumeration).
     let readSucceeded: Bool
+
+    init(facts: [AudioProcessFacts], allObjectIDs: [AudioObjectID], readSucceeded: Bool) {
+        self.facts = facts
+        self.allObjectIDs = allObjectIDs
+        self.readSucceeded = readSucceeded
+    }
 }
 
 /// Lightweight value for detecting process list changes without comparing icons.
@@ -125,6 +137,20 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     /// daemon as wedged. Generous: this walk is several IPC round-trips and can
     /// legitimately be slow under heavy load.
     private let enumerationTimeout: TimeInterval = 6.0
+
+    /// Whether to register per-process HAL listeners. Tests inject synthetic
+    /// process objects, so registering real listeners for them would be pointless
+    /// IPC against IDs the HAL never issued.
+    var managesHALListeners = true
+
+    /// Performs one deadline-bounded enumeration. Returns `nil` when the HAL
+    /// missed its deadline. Injectable so tests can drive the publish, coalesce,
+    /// and circuit-breaker paths without a real `coreaudiod`.
+    var enumerate: (_ excludingPID: pid_t, _ timeout: TimeInterval) async -> ProcessEnumeration? = { pid, timeout in
+        await HALExecutor.run(timeout: timeout) {
+            AudioProcessMonitor.enumerateAudioProcesses(excluding: pid)
+        }
+    }
 
     private var processListAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyProcessObjectList,
@@ -310,9 +336,7 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let timeout = self.enumerationTimeout
-            let enumeration = await HALExecutor.run(timeout: timeout) {
-                Self.enumerateAudioProcesses(excluding: myPID)
-            }
+            let enumeration = await self.enumerate(myPID, timeout)
             self.refreshInFlight = false
 
             guard let enumeration else {
@@ -338,7 +362,7 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
 
     /// The HAL half of a refresh. Runs entirely off the main thread and touches
     /// no actor-isolated state, so it is safe to abandon on timeout.
-    private nonisolated static func enumerateAudioProcesses(excluding myPID: pid_t) -> ProcessEnumeration {
+    nonisolated static func enumerateAudioProcesses(excluding myPID: pid_t) -> ProcessEnumeration {
         guard let processIDs = try? AudioObjectID.readProcessList() else {
             return ProcessEnumeration(facts: [], allObjectIDs: [], readSucceeded: false)
         }
@@ -447,6 +471,7 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     /// IPC too, and a wedged daemon must not be able to freeze the UI through
     /// listener churn.
     private func updateProcessListeners(for processIDs: [AudioObjectID]) {
+        guard managesHALListeners else { return }
         let currentSet = Set(processIDs)
 
         let removed = monitoredProcesses.subtracting(currentSet)
