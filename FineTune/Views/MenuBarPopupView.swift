@@ -105,6 +105,10 @@ struct MenuBarPopupView: View {
 
     /// Hover state for support link heart animation
     @State private var isSupportHovered = false
+    /// Manual capture rebuild running (footer button). Recreating every tap is
+    /// fast but not instant, so the button reports progress instead of looking
+    /// like it did nothing.
+    @State private var isRebuildingCapture = false
 
     @State private var isOutputTabHovered = false
     @State private var isInputTabHovered = false
@@ -424,6 +428,8 @@ struct MenuBarPopupView: View {
 
                 Spacer()
 
+                rebuildCaptureButton
+
                 Button {
                     NSApplication.shared.terminate(nil)
                 } label: {
@@ -443,6 +449,54 @@ struct MenuBarPopupView: View {
                 .help("Quit FineTune (⌘Q)")
             }
         }
+    }
+
+    // MARK: - Rebuild Capture
+
+    /// Recreates every per-app tap. Sits next to Quit because it's the fix the
+    /// user reaches for when an app's volume stops responding or an app that is
+    /// playing never shows up — having it here avoids a trip to Settings.
+    /// Disabled while the audio system itself is unresponsive: rebuilding is all
+    /// HAL work, so Settings ▸ Troubleshooting ▸ Reset Core Audio is the fix then.
+    @ViewBuilder
+    private var rebuildCaptureButton: some View {
+        let audioSystemDown = !audioEngine.audioSystemHealth.allowsPeriodicHALWork
+
+        Button {
+            guard !isRebuildingCapture else { return }
+            // Set synchronously, before the Task: `.disabled` only re-evaluates
+            // after this flag flips, so flipping it inside the Task would let
+            // two clicks in the same runloop turn both start a rebuild.
+            isRebuildingCapture = true
+            Task {
+                await audioEngine.rebuildAllTaps()
+                isRebuildingCapture = false
+            }
+        } label: {
+            Group {
+                if isRebuildingCapture {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(.title3, weight: .regular))
+                        .symbolRenderingMode(.hierarchical)
+                }
+            }
+            .frame(
+                minWidth: DesignTokens.Dimensions.minTouchTarget,
+                minHeight: DesignTokens.Dimensions.minTouchTarget
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(DesignTokens.Colors.interactiveDefault)
+        .iconButtonStyle()
+        .disabled(isRebuildingCapture || audioSystemDown)
+        .accessibilityLabel("Rebuild app capture")
+        .help(audioSystemDown
+              ? "Audio system isn't responding — reset Core Audio in Settings"
+              : "Rebuild app capture — use if an app's volume stops working or it's missing from the list")
     }
 
     // MARK: - Default Devices Status
