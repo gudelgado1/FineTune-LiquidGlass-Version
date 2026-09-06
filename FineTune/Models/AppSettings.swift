@@ -32,8 +32,10 @@ enum MenuBarIconStyle: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// The icon name - either asset catalog name or SF Symbol
-    var iconName: String {
+    /// The icon name - either asset catalog name or SF Symbol.
+    /// `nonisolated`: read from `MenuBarIconState.baseline`'s default argument,
+    /// which is evaluated outside the main actor.
+    nonisolated var iconName: String {
         switch self {
         case .default: return "MenuBarIcon"
         case .speaker: return "speaker.wave.2.fill"

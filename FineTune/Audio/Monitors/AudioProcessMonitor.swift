@@ -5,7 +5,7 @@ import os
 
 /// HAL-derived facts about one audio process, gathered off the main thread.
 /// `Sendable` so it can cross the executor's thread boundary.
-struct AudioProcessFacts: Sendable {
+nonisolated struct AudioProcessFacts: Sendable {
     let objectID: AudioObjectID
     let pid: pid_t
     let bundleID: String?
@@ -18,7 +18,7 @@ struct AudioProcessFacts: Sendable {
 }
 
 /// Result of one off-main enumeration pass.
-struct ProcessEnumeration: Sendable {
+nonisolated struct ProcessEnumeration: Sendable {
     let facts: [AudioProcessFacts]
     /// Every process object the HAL reported, for listener bookkeeping.
     let allObjectIDs: [AudioObjectID]
