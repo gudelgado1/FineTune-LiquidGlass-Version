@@ -19,6 +19,10 @@ struct DeviceBadge: View {
     /// output devices; input device rows pass `"mic"` so the fallback matches
     /// the row's domain.
     var fallbackSymbol: String = "speaker.wave.2.fill"
+    /// User-chosen SF Symbol for this device. Takes precedence over `icon` —
+    /// setting an override is meant to replace the device's own artwork, and the
+    /// menu bar reads the same value, so the two surfaces can't disagree.
+    var overrideSymbol: String? = nil
 
     private static let badgeSize: CGFloat = 28
     private static let glyphSize: CGFloat = 20
@@ -43,9 +47,12 @@ struct DeviceBadge: View {
                     .fill(DesignTokens.Colors.deviceBadgeMonoFill)
             }
 
-            // Glyph — device icon when present, fallback SF Symbol otherwise.
+            // Glyph — override first, then the device's own icon, then fallback.
             Group {
-                if let icon {
+                if let overrideSymbol {
+                    Image(systemName: overrideSymbol)
+                        .symbolRenderingMode(.hierarchical)
+                } else if let icon {
                     Image(nsImage: icon)
                         .resizable()
                         .aspectRatio(contentMode: .fit)

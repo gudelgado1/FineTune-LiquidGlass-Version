@@ -84,6 +84,7 @@ extension MenuBarPopupView {
 
                     DeviceRow(
                         device: device,
+                        iconOverride: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid),
                         isDefault: device.id == deviceVolumeMonitor.defaultDeviceID,
                         volume: deviceVolumeMonitor.volumes[device.id] ?? 1.0,
                         isMuted: deviceVolumeMonitor.muteStates[device.id] ?? false,
@@ -225,6 +226,10 @@ extension MenuBarPopupView {
                 } else {
                     audioEngine.settingsManager.toggleOutputDeviceHidden(uid: device.uid)
                 }
+            },
+            iconOverride: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid),
+            onIconOverrideChange: { symbol in
+                audioEngine.settingsManager.setDeviceIconOverride(for: device.uid, to: symbol)
             },
             expandedContent: {
                 // Only render when actually expanded. Input devices skip

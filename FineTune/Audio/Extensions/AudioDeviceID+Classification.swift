@@ -126,9 +126,16 @@ extension AudioDeviceID {
     /// Returns an appropriate SF Symbol name based on device name and transport type.
     /// Used as fallback when kAudioDevicePropertyIcon is not available.
     func suggestedIconSymbol() -> String {
-        let name = (try? readDeviceName()) ?? ""
-        let transport = readTransportType()
+        Self.iconSymbol(forName: (try? readDeviceName()) ?? "", transport: readTransportType())
+    }
 
+    /// Pure name/transport → SF Symbol mapping. Split out of
+    /// `suggestedIconSymbol()` so the cascade can be tested without a real
+    /// device, and so the icon picker can offer the same derived default.
+    ///
+    /// Ordered most-specific-first: "AirPods Pro" must be checked before
+    /// "AirPods", or every Pro would map to the plain glyph.
+    nonisolated static func iconSymbol(forName name: String, transport: TransportType) -> String {
         // AirPods variants
         if name.contains("AirPods Pro") { return "airpodspro" }
         if name.contains("AirPods Max") { return "airpodsmax" }

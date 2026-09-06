@@ -19,6 +19,8 @@ import SwiftUI
 /// See: IOAudioLevelControl.h, MCCS VCP 0x62, empirical ScalarToDecibels measurement.
 struct DeviceRow: View {
     let device: AudioDevice
+    /// User's icon override for this device, if any.
+    var iconOverride: String? = nil
     let isDefault: Bool
     let volume: Float
     let isMuted: Bool
@@ -73,6 +75,7 @@ struct DeviceRow: View {
 
     init(
         device: AudioDevice,
+        iconOverride: String? = nil,
         isDefault: Bool,
         volume: Float,
         isMuted: Bool,
@@ -97,6 +100,7 @@ struct DeviceRow: View {
         onAutoEQToggleExpansion: @escaping () -> Void = {}
     ) {
         self.device = device
+        self.iconOverride = iconOverride
         self.isDefault = isDefault
         self.volume = volume
         self.isMuted = isMuted
@@ -182,7 +186,7 @@ struct DeviceRow: View {
             // Selection is now signalled by accent-colored gradient on the
             // badge plus bold device name; the row-level gesture in `body`
             // handles tap-to-set-default.
-            DeviceBadge(icon: device.icon, isSelected: isDefault)
+            DeviceBadge(icon: device.icon, isSelected: isDefault, overrideSymbol: iconOverride)
 
             // Device name + optional AutoEQ profile subtitle.
             // For AutoEQ-capable devices the name area also acts as the

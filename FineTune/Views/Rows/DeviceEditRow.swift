@@ -17,9 +17,15 @@ struct DeviceEditRow<ExpandedContent: View>: View {
     let onReorder: (Int) -> Void
     let onToggleExpand: () -> Void
     let onToggleHidden: () -> Void
+    /// User's icon override for this device, or nil while it uses the automatic icon.
+    var iconOverride: String? = nil
+    /// Persists a new override; `nil` restores the automatic icon.
+    var onIconOverrideChange: (String?) -> Void = { _ in }
     @ViewBuilder let expandedContent: () -> ExpandedContent
 
     @State private var isInfoButtonHovered = false
+    @State private var isIconHovered = false
+    @State private var showingIconPicker = false
 
     var body: some View {
         ExpandableGlassRow(isExpanded: isExpanded) {
@@ -55,18 +61,44 @@ struct DeviceEditRow<ExpandedContent: View>: View {
             )
 
             HStack(spacing: DesignTokens.Spacing.sm) {
-                Group {
-                    if let icon = device.icon {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                    } else {
-                        Image(systemName: isInputDevice ? "mic" : "speaker.wave.2")
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(.secondary)
+                Button {
+                    showingIconPicker = true
+                } label: {
+                    Group {
+                        // An override wins over the device's own icon image —
+                        // that is the whole point of setting one.
+                        if let iconOverride {
+                            Image(systemName: iconOverride)
+                                .symbolRenderingMode(.hierarchical)
+                        } else if let icon = device.icon {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                        } else {
+                            Image(systemName: isInputDevice ? "mic" : "speaker.wave.2")
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(width: DesignTokens.Dimensions.iconSize, height: DesignTokens.Dimensions.iconSize)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(isIconHovered ? DesignTokens.Colors.deviceBadgeMonoFill : Color.clear)
+                    )
+                    .contentShape(Rectangle())
                 }
-                .frame(width: DesignTokens.Dimensions.iconSize, height: DesignTokens.Dimensions.iconSize)
+                .buttonStyle(.plain)
+                .onHover { isIconHovered = $0 }
+                .help("Change this device's icon")
+                .accessibilityLabel("Change icon for \(device.name)")
+                .popover(isPresented: $showingIconPicker, arrowEdge: .bottom) {
+                    DeviceIconPicker(
+                        deviceName: device.name,
+                        transport: device.id.readTransportType(),
+                        currentOverride: iconOverride,
+                        onSelect: onIconOverrideChange
+                    )
+                }
 
                 Text(device.name)
                     .font(DesignTokens.Typography.rowName)

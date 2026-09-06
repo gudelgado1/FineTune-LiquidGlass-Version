@@ -352,10 +352,10 @@ struct SettingsMigrationV10toV11Tests {
         #expect(decoded.softwareDeviceSavedVolumes.isEmpty)
     }
 
-    @Test("Re-encode after v10 decode bumps to v11 on a fresh Settings instance")
-    func defaultSettingsVersionIsEleven() {
+    @Test("A fresh Settings instance carries the current schema version")
+    func defaultSettingsVersionIsCurrent() {
         let fresh = SettingsManager.Settings()
-        #expect(fresh.version == 11)
+        #expect(fresh.version == 12)  // v12 added deviceIconOverrides
         #expect(fresh.deviceVolumeTierOverride.isEmpty)
     }
 

@@ -43,6 +43,8 @@ nonisolated enum MenuBarIconState: Equatable {
     case speakerMuted
     case staticBaseline(MenuBarIconImage)
     case deviceFlash(symbol: String)
+    /// Persistent icon that mirrors the current output device's symbol.
+    case device(symbol: String)
 
     var image: MenuBarIconImage {
         switch self {
@@ -50,6 +52,7 @@ nonisolated enum MenuBarIconState: Equatable {
         case .speakerMuted:              return .systemSymbol("speaker.slash.fill")
         case .staticBaseline(let image): return image
         case .deviceFlash(let symbol):   return .systemSymbol(symbol)
+        case .device(let symbol):        return .systemSymbol(symbol)
         }
     }
 }
@@ -60,7 +63,8 @@ extension MenuBarIconState {
     static func baseline(
         style: MenuBarIconStyle,
         volume: Float,
-        muted: Bool
+        muted: Bool,
+        deviceSymbol: String = MenuBarIconStyle.device.iconName
     ) -> MenuBarIconState {
         switch style {
         case .speaker:
@@ -72,6 +76,8 @@ extension MenuBarIconState {
             return .staticBaseline(.systemSymbol("waveform"))
         case .equalizer:
             return .staticBaseline(.systemSymbol("slider.vertical.3"))
+        case .device:
+            return .device(symbol: deviceSymbol)
         }
     }
 }

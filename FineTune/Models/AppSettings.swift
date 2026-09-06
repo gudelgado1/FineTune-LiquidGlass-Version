@@ -26,6 +26,9 @@ enum MenuBarIconStyle: String, Codable, CaseIterable, Identifiable {
     case speaker = "Speaker"
     case waveform = "Waveform"
     case equalizer = "Equalizer"
+    /// Follows the current output device: shows that device's own symbol
+    /// (honouring a per-device icon override) instead of a fixed glyph.
+    case device = "Device"
 
     var id: String { rawValue }
 
@@ -34,6 +37,7 @@ enum MenuBarIconStyle: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .default: return "MenuBarIcon"
         case .speaker: return "speaker.wave.2.fill"
+        case .device: return "headphones"
         case .waveform: return "waveform"
         case .equalizer: return "slider.vertical.3"
         }

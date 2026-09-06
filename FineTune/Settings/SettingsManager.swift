@@ -15,12 +15,13 @@ final class SettingsManager {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "SettingsManager")
 
     struct Settings: Codable {
-        var version: Int = 11
+        var version: Int = 12
         var appVolumes: [String: Float] = [:]
         var appDeviceRouting: [String: String] = [:]  // bundleID → deviceUID
         var appMutes: [String: Bool] = [:]  // bundleID → isMuted
         var appBoosts: [String: Float] = [:]  // bundleID → boost rawValue (1.0, 2.0, 3.0, 4.0)
         var appEQSettings: [String: EQSettings] = [:]  // bundleID → EQ settings
+        var deviceIconOverrides: [String: String] = [:]  // device UID → SF Symbol name
         var appSettings: AppSettings = AppSettings()  // App-wide settings
         var systemSoundsFollowsDefault: Bool = true  // Whether system sounds follows macOS default
         var appDeviceSelectionMode: [String: DeviceSelectionMode] = [:]  // bundleID → selection mode
@@ -90,6 +91,7 @@ final class SettingsManager {
             pinnedAppInfo = try c.decodeIfPresent([String: PinnedAppInfo].self, forKey: .pinnedAppInfo) ?? [:]
             ignoredApps = try c.decodeIfPresent(Set<String>.self, forKey: .ignoredApps) ?? []
             ignoredAppInfo = try c.decodeIfPresent([String: IgnoredAppInfo].self, forKey: .ignoredAppInfo) ?? [:]
+            deviceIconOverrides = try c.decodeIfPresent([String: String].self, forKey: .deviceIconOverrides) ?? [:]
             ddcVolumes = try c.decodeIfPresent([String: Int].self, forKey: .ddcVolumes) ?? [:]
             ddcMuteStates = try c.decodeIfPresent([String: Bool].self, forKey: .ddcMuteStates) ?? [:]
             ddcSavedVolumes = try c.decodeIfPresent([String: Int].self, forKey: .ddcSavedVolumes) ?? [:]
@@ -737,12 +739,36 @@ final class SettingsManager {
     // MARK: - Reset All Settings
 
     /// Resets all per-app settings and app-wide settings to defaults
+    // MARK: - Per-Device Icon Override
+
+    /// The user's chosen SF Symbol for a device, or nil when the automatic icon
+    /// (derived from name + transport) should be used.
+    func getDeviceIconOverride(for deviceUID: String) -> String? {
+        settings.deviceIconOverrides[deviceUID]
+    }
+
+    /// All UID → symbol overrides, for views rendering many devices at once.
+    var deviceIconOverrides: [String: String] {
+        settings.deviceIconOverrides
+    }
+
+    /// Sets or clears a device's icon override. `nil` restores the automatic icon.
+    func setDeviceIconOverride(for deviceUID: String, to symbol: String?) {
+        if let symbol {
+            settings.deviceIconOverrides[deviceUID] = symbol
+        } else {
+            settings.deviceIconOverrides.removeValue(forKey: deviceUID)
+        }
+        scheduleSave()
+    }
+
     func resetAllSettings() {
         settings.appVolumes.removeAll()
         settings.appBoosts.removeAll()
         settings.appDeviceRouting.removeAll()
         settings.appMutes.removeAll()
         settings.appEQSettings.removeAll()
+        settings.deviceIconOverrides.removeAll()
         settings.pinnedApps.removeAll()
         settings.pinnedAppInfo.removeAll()
         settings.ignoredApps.removeAll()
