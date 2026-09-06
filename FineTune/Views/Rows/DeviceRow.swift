@@ -44,6 +44,8 @@ struct DeviceRow: View {
     let autoEQPreampEnabled: Bool
     let onAutoEQPreampToggle: (() -> Void)?
     let isFocused: Bool
+    /// Popup-owned keyboard percentage entry.
+    var textEntry: PopupTextEntryCoordinator? = nil
     /// Whether the inline AutoEQ inspector is open under this row. Mirrors the
     /// `isEQExpanded` pattern of `AppRow` so device AutoEQ expansion uses the
     /// same `expandedRowID` state as per-app EQ in `MenuBarPopupView`.
@@ -96,6 +98,7 @@ struct DeviceRow: View {
         autoEQPreampEnabled: Bool = true,
         onAutoEQPreampToggle: (() -> Void)? = nil,
         isFocused: Bool = false,
+        textEntry: PopupTextEntryCoordinator? = nil,
         isAutoEQExpanded: Bool = false,
         onAutoEQToggleExpansion: @escaping () -> Void = {}
     ) {
@@ -121,6 +124,7 @@ struct DeviceRow: View {
         self.autoEQPreampEnabled = autoEQPreampEnabled
         self.onAutoEQPreampToggle = onAutoEQPreampToggle
         self.isFocused = isFocused
+        self.textEntry = textEntry
         self.isAutoEQExpanded = isAutoEQExpanded
         self.onAutoEQToggleExpansion = onAutoEQToggleExpansion
         self._sliderValue = State(initialValue: Self.volumeToSlider(volume, backend: volumeBackend))
@@ -297,7 +301,9 @@ struct DeviceRow: View {
                 range: 0...100,
                 onEditingChanged: { editing in
                     withAnimation(DesignTokens.Animation.hover) { isPercentageEditing = editing }
-                }
+                },
+                isRowFocused: isFocused,
+                textEntry: textEntry
             )
             .opacity(isRowHovered || isEditing || isPercentageEditing ? 1 : 0)
             .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)

@@ -43,12 +43,22 @@ extension MenuBarPopupView {
 
         let mods = keyPress.modifiers
         let isM = keyPress.key == KeyEquivalent("m")
+        // A bare digit types a percentage into the selected row. Modified digits
+        // are left alone — ⌘1 and friends belong to the system, not to us.
+        let digit: String? = {
+            guard mods.isEmpty, let scalar = keyPress.characters.unicodeScalars.first,
+                  keyPress.characters.count == 1, ("0"..."9").contains(keyPress.characters)
+            else { return nil }
+            _ = scalar
+            return keyPress.characters
+        }()
+        let isDigit = digit != nil
         let isRecognized: Bool = {
             switch keyPress.key {
             case .upArrow, .downArrow, .leftArrow, .rightArrow, .return, .space, .tab:
                 return true
             default:
-                return isM
+                return isM || isDigit
             }
         }()
         // Wake gate: compute target locally so first-press actions never read a
@@ -91,6 +101,11 @@ extension MenuBarPopupView {
             toggleDeviceTab()
             return .handled
         default:
+            if let digit, target != nil {
+                // The focused row's editor picks this up (see EditablePercentage).
+                textEntry.send(digit: digit)
+                return .handled
+            }
             return isM ? toggleMute(for: target) : .ignored
         }
     }

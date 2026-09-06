@@ -120,6 +120,8 @@ struct MenuBarPopupView: View {
     @Namespace private var deviceTabsGlass
 
     @State var navModel = PopupKeyboardNavModel()
+    /// Delivers digits typed on the keyboard-selected row to that row's editor.
+    @State var textEntry = PopupTextEntryCoordinator()
     /// Logical keyboard-nav selection. Plain @State (not @FocusState) so reads
     /// and writes are synchronous within a single event handler — using
     /// @FocusState here raced with SwiftUI's auto-focus-on-key-window claim

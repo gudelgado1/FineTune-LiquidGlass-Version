@@ -126,6 +126,7 @@ extension MenuBarPopupView {
                             audioEngine.setAutoEQPreampEnabled(!audioEngine.autoEQPreampEnabled)
                         },
                         isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid),
+                        textEntry: textEntry,
                         // Reuse the same `expandedRowID` slot used by per-app EQ.
                         // Device UIDs and app PIDs are disjoint string spaces so
                         // there's no risk of collision — only one inspector is

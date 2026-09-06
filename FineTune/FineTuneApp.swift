@@ -254,7 +254,11 @@ struct FineTuneApp: App {
             volume: launchVolumeMonitor.volumes[launchID] ?? 1.0,
             muted: launchVolumeMonitor.muteStates[launchID] ?? false
         )
+        // Fall back through the same renderer, not a raw NSImage: an unrenderable
+        // symbol (stale override, glyph dropped by a macOS release) would otherwise
+        // hand the status item an off-canvas image and make its width jump.
         launchIconImage = launchState.image.nsImage()
+            ?? MenuBarIconImage.systemSymbol("speaker.wave.2").nsImage()
             ?? NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "FineTune")!
 
         // Start Accessibility polling immediately so `isTrustedCached` is live
