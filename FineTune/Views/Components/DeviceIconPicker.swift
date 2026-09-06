@@ -19,6 +19,7 @@ struct DeviceIconPicker: View {
     let onSelect: (String?) -> Void
 
     @State private var query = ""
+    @State private var hoveredSymbol: String?
     @Environment(\.dismiss) private var dismiss
 
     private static let columns = Array(repeating: GridItem(.fixed(38), spacing: 6), count: 7)
@@ -133,9 +134,7 @@ struct DeviceIconPicker: View {
                 .frame(width: 34, height: 30)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isCurrent
-                              ? DesignTokens.Colors.accentPrimary.opacity(0.22)
-                              : Color.clear)
+                        .fill(cellFill(isCurrent: isCurrent, isHovered: hoveredSymbol == symbol))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -147,7 +146,16 @@ struct DeviceIconPicker: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hoveredSymbol = $0 ? symbol : (hoveredSymbol == symbol ? nil : hoveredSymbol) }
         .help(symbol)
         .accessibilityLabel(symbol)
+    }
+
+    /// Hover reads as a hint, the current selection as a statement — so the
+    /// selected cell keeps its stronger fill even while hovered.
+    private func cellFill(isCurrent: Bool, isHovered: Bool) -> Color {
+        if isCurrent { return DesignTokens.Colors.accentPrimary.opacity(0.22) }
+        if isHovered { return DesignTokens.Colors.deviceBadgeMonoFill }
+        return .clear
     }
 }
