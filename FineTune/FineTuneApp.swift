@@ -189,6 +189,9 @@ struct FineTuneApp: App {
         let statusService = MediaKeyStatus()
         let popupService = PopupVisibilityService()
         let hud = HUDWindowController(settingsManager: settings, mediaKeyStatus: statusService, popupVisibility: popupService)
+        // Restores the macOS "play feedback when volume is changed" pop: FineTune
+        // swallows the media keys, so the system stops playing it while we run.
+        let feedbackPlayer = VolumeFeedbackPlayer()
 
         // Wire the interactive Tahoe slider back to the device volume monitor.
         // Mirrors the mute semantics applied for media-key drags (auto-unmute
@@ -209,6 +212,9 @@ struct FineTuneApp: App {
             }
             let gain = VolumeMapping.systemGain(forSliderFraction: sliderFraction, tier: tier)
             volumeMonitor.setVolume(for: deviceID, to: gain)
+            feedbackPlayer.requestFeedback(
+                gain: VolumeFeedback.gain(tier: tier, sliderFraction: sliderFraction)
+            )
         }
 
         let monitor = MediaKeyMonitor(
@@ -220,6 +226,8 @@ struct FineTuneApp: App {
             popupVisibility: popupService,
             mediaKeyStatus: statusService
         )
+        monitor.feedbackPlayer = feedbackPlayer
+
         _accessibility = State(initialValue: accessibilityService)
         _notifications = State(initialValue: notificationPermission)
         _mediaKeyStatus = State(initialValue: statusService)

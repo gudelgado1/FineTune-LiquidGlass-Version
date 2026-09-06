@@ -213,7 +213,10 @@ final class MediaKeyMonitor {
 
     /// Applies a decoded `MediaKeyEvent` to the default output device, or—for the
     /// F7/F8/F9 transport keys—forwards it to the marked default media app.
-    func handle(_ event: MediaKeyEvent) {
+    /// Plays the system volume-feedback pop on volume key steps. Wired by FineTuneApp after init.
+    var feedbackPlayer: VolumeFeedbackPlayer?
+
+    func handle(_ event: MediaKeyEvent, shiftHeld: Bool = false, optionHeld: Bool = false) {
         if event.isTransport {
             handleTransport(event)
             return
@@ -235,7 +238,14 @@ final class MediaKeyMonitor {
             currentVolume: volumeMonitor.volumes[deviceID] ?? 0,
             currentMute: volumeMonitor.muteStates[deviceID] ?? false,
             setVolume: { id, vol in volumeMonitor.setVolume(for: id, to: vol) },
-            setMute:   { id, mute in volumeMonitor.setMute(for: id, to: mute) }
+            setMute:   { id, mute in volumeMonitor.setMute(for: id, to: mute) },
+            playFeedback: { gain in
+                self.feedbackPlayer?.requestFeedback(
+                    gain: gain,
+                    shiftHeld: shiftHeld,
+                    optionHeld: optionHeld
+                )
+            }
         )
     }
 
@@ -274,7 +284,8 @@ final class MediaKeyMonitor {
         currentVolume: Float,
         currentMute: Bool,
         setVolume: (AudioDeviceID, Float) -> Void,
-        setMute: (AudioDeviceID, Bool) -> Void
+        setMute: (AudioDeviceID, Bool) -> Void,
+        playFeedback: (Float) -> Void = { _ in }
     ) {
         let shouldShowHUD = !popupVisibility.isVisible
         let sliderDelta = settingsManager.appSettings.volumeHotkeyStep.sliderDelta
@@ -303,6 +314,7 @@ final class MediaKeyMonitor {
             let nextSlider = min(1.0, currentSlider + sliderDelta)
             let newVolume = VolumeMapping.systemGain(forSliderFraction: nextSlider, tier: tier)
             setVolume(deviceID, newVolume)
+            playFeedback(VolumeFeedback.gain(tier: tier, sliderFraction: nextSlider))
             if shouldShowHUD {
                 hudController.show(sliderFraction: nextSlider, mute: false, deviceName: deviceName)
             }
@@ -328,6 +340,7 @@ final class MediaKeyMonitor {
                 setMute(deviceID, false)
             }
             setVolume(deviceID, newVolume)
+            playFeedback(VolumeFeedback.gain(tier: tier, sliderFraction: nextSlider))
             if shouldShowHUD {
                 // A muted device stepping down to 0 STAYS muted (no unmute above)
                 // — the HUD must say so instead of flashing an unmuted speaker.
@@ -443,7 +456,12 @@ final class MediaKeyMonitor {
         }
 
         hudController.swallowObserved()
-        handle(mediaEvent)
+        // Shift inverts the system "play feedback" preference, matching macOS.
+        handle(
+            mediaEvent,
+            shiftHeld: cgEvent.flags.contains(.maskShift),
+            optionHeld: cgEvent.flags.contains(.maskAlternate)
+        )
         return true
     }
 }

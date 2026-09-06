@@ -346,6 +346,112 @@ struct MediaKeyMonitorHandlerTests {
         #expect(writtenMute == false)
     }
 
+    // MARK: - Volume-feedback hook
+    //
+    // FineTune swallows the media keys, so macOS stops playing its own
+    // "volume changed" pop while we run. These pin the replacement to the same
+    // rules: it follows actual volume writes, and never fires on mute.
+
+    @Test("volumeUp on hardware tier requests feedback at unity gain")
+    func feedbackOnVolumeUpHardware() {
+        // Hardware/DDC attenuate inside the device, so the pop plays at full scale.
+        let (monitor, _, _, _) = makeMonitor()
+        var feedbackGain: Float?
+        monitor.handleCore(
+            event: .volumeUp(isRepeat: false), deviceID: 1, tier: .hardware,
+            deviceName: "Test Device", currentVolume: 0.5, currentMute: false,
+            setVolume: { _, _ in }, setMute: { _, _ in },
+            playFeedback: { feedbackGain = $0 }
+        )
+        #expect(feedbackGain == 1.0)
+    }
+
+    @Test("volumeUp on software tier pops at exactly the gain written to the device")
+    func feedbackGainTracksSoftwareTier() {
+        // The pop bypasses FineTune's taps, so on a software-tier device it has to
+        // self-scale with the same mapping or it would blast at full volume.
+        let (monitor, _, _, _) = makeMonitor()
+        var written: Float?
+        var feedbackGain: Float?
+        monitor.handleCore(
+            event: .volumeUp(isRepeat: false), deviceID: 1, tier: .software,
+            deviceName: "Test Device", currentVolume: 0.5, currentMute: false,
+            setVolume: { _, v in written = v }, setMute: { _, _ in },
+            playFeedback: { feedbackGain = $0 }
+        )
+        #expect(feedbackGain != nil)
+        #expect(feedbackGain == written)
+    }
+
+    @Test("volumeDown requests feedback")
+    func feedbackOnVolumeDown() {
+        let (monitor, _, _, _) = makeMonitor()
+        var feedbackCalls = 0
+        monitor.handleCore(
+            event: .volumeDown(isRepeat: false), deviceID: 1, tier: .hardware,
+            deviceName: "Test Device", currentVolume: 0.5, currentMute: false,
+            setVolume: { _, _ in }, setMute: { _, _ in },
+            playFeedback: { _ in feedbackCalls += 1 }
+        )
+        #expect(feedbackCalls == 1)
+    }
+
+    @Test("muteToggle never requests feedback (matches native behaviour)")
+    func noFeedbackOnMuteToggle() {
+        let (monitor, _, _, _) = makeMonitor()
+        var feedbackCalls = 0
+        monitor.handleCore(
+            event: .muteToggle, deviceID: 1, tier: .hardware,
+            deviceName: "Test Device", currentVolume: 0.5, currentMute: false,
+            setVolume: { _, _ in }, setMute: { _, _ in },
+            playFeedback: { _ in feedbackCalls += 1 }
+        )
+        #expect(feedbackCalls == 0)
+    }
+
+    @Test("DDC-coalesced repeats skip feedback along with the volume write")
+    func feedbackCoalescedWithDDC() {
+        // One pop per actual write: without this, key-repeat on a DDC monitor
+        // would machine-gun the sound while the volume moves once.
+        let (monitor, _, _, _) = makeMonitor()
+        var setVolumeCalls = 0
+        var feedbackCalls = 0
+        for _ in 0..<4 {
+            monitor.handleCore(
+                event: .volumeUp(isRepeat: true), deviceID: 1, tier: .ddc,
+                deviceName: "Test Display", currentVolume: 0.5, currentMute: false,
+                setVolume: { _, _ in setVolumeCalls += 1 }, setMute: { _, _ in },
+                playFeedback: { _ in feedbackCalls += 1 }
+            )
+        }
+        #expect(setVolumeCalls == 1)
+        #expect(feedbackCalls == setVolumeCalls)
+    }
+
+    @Test("volumeDown landing on silence still pops, and still does not auto-mute")
+    func feedbackOnVolumeDownToZero() {
+        // Upstream pairs this row with an auto-mute; this fork deliberately
+        // dropped auto-mute-at-zero (see volumeDownToZeroDoesNotAutoMute), so the
+        // pop must fire while the mute flag stays untouched.
+        let (monitor, _, _, settings) = makeMonitor()
+        var appSettings = settings.appSettings
+        appSettings.volumeHotkeyStep = .normal   // 1/16 step lands exactly on 0
+        settings.updateAppSettings(appSettings)
+
+        var writtenMute: Bool?
+        var writtenVolume: Float?
+        var feedbackCalls = 0
+        monitor.handleCore(
+            event: .volumeDown(isRepeat: false), deviceID: 1, tier: .hardware,
+            deviceName: "Test Device", currentVolume: 1.0 / 16.0, currentMute: false,
+            setVolume: { _, v in writtenVolume = v }, setMute: { _, m in writtenMute = m },
+            playFeedback: { _ in feedbackCalls += 1 }
+        )
+        #expect(writtenVolume == 0)
+        #expect(writtenMute == nil)
+        #expect(feedbackCalls == 1)
+    }
+
     @Test("volumeDown to 0 while unmuted reaches silence WITHOUT setting the mute flag")
     func volumeDownToZeroDoesNotAutoMute() {
         // Auto-mute-at-zero was removed deliberately: on DDC monitors it trapped

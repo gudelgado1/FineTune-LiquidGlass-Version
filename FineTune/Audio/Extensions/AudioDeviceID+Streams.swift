@@ -56,6 +56,18 @@ extension AudioDeviceID {
 
     /// Returns the first output stream index in the device's global stream list.
     /// CATapDescription(deviceUID:stream:) expects this global index, not an output-only index.
+    /// Number of streams in the given scope. Counts streams, not channels.
+    nonisolated func streamCount(scope: AudioObjectPropertyScope) -> Int {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(self, &address, 0, nil, &size) == noErr else { return 0 }
+        return Int(size) / MemoryLayout<AudioObjectID>.size
+    }
+
     nonisolated func firstOutputStreamIndex() throws -> UInt {
         let globalStreams = try readStreams(scope: kAudioObjectPropertyScopeGlobal)
         for (index, streamID) in globalStreams.enumerated() {
