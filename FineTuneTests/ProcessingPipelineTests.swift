@@ -1064,7 +1064,7 @@ struct LoudnessIntegrationTests {
 
     @Test("Loudness equalizer modifies output vs nil-processor baseline when enabled")
     func loudnessEqualizerModifiesOutput() {
-        let frames = 4096
+        let frames = 48000  // 1 s: the momentary leveler (400 ms window, 100 ms hop) needs more than one hop to change gain
         let sampleRate: Float = 48000
 
         // Create stereo input with moderate amplitude
@@ -1114,7 +1114,7 @@ struct LoudnessIntegrationTests {
 
     @Test("Loudness chain ordering: compensator shapes frequency, equalizer adjusts level")
     func loudnessChainOrdering() {
-        let frames = 4096
+        let frames = 48000  // 1 s: the momentary leveler (400 ms window, 100 ms hop) needs more than one hop to change gain
         let sampleRate = 48000.0
 
         // Create a low-frequency stereo signal that compensator will boost

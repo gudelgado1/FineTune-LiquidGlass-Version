@@ -136,15 +136,22 @@ final class DDCService: @unchecked Sendable {
 
     /// Writes a DDC packet without reading a response.
     private func i2cWrite(packet: [UInt8]) throws {
+        // Send EVERY configured write cycle instead of stopping at the first
+        // success: some displays only apply the second write, so returning early
+        // left the volume unchanged on them. Matching `i2cWriteRead` above, any
+        // cycle succeeding counts as success — a later cycle erroring doesn't
+        // undo a value the display already took (ronitsingh10/FineTune#362).
+        var lastResult: IOReturn = kIOReturnError
+        var anySucceeded = false
         for _ in 0..<numWriteCycles {
             usleep(writeSleepTime)
-            let result = packet.withUnsafeBufferPointer { buf in
+            lastResult = packet.withUnsafeBufferPointer { buf in
                 IOAVServiceLoader.writeI2C(service: service, chipAddress: chipAddress,
                                            dataAddress: writeAddress, buffer: buf.baseAddress!, size: UInt32(buf.count))
             }
-            if result == kIOReturnSuccess { return }
+            if lastResult == kIOReturnSuccess { anySucceeded = true }
         }
-        throw DDCError.writeFailed(kIOReturnError)
+        guard anySucceeded else { throw DDCError.writeFailed(lastResult) }
     }
 
     // MARK: - VCP Commands
