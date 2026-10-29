@@ -191,10 +191,11 @@ extension AudioEngine {
         return levels
     }
 
-    func applyPersistedSettings() {
+    func applyPersistedSettings(additionalApps: [AudioApp] = []) {
         guard captureRebuildTask == nil else { return }
         guard permission.status == .authorized else { return }
-        for app in apps {
+        let activeIDs = Set(apps.map { $0.id })
+        for app in apps + additionalApps.filter({ !activeIDs.contains($0.id) }) {
             guard !appliedPIDs.contains(app.id) else { continue }
             guard !settingsManager.isIgnored(app.persistenceIdentifier) else { continue }
 
@@ -216,7 +217,21 @@ extension AudioEngine {
                         .sorted()  // Deterministic ordering
                     if !availableUIDs.isEmpty {
                         logger.debug("Restoring multi-device mode for \(app.name) with \(availableUIDs.count) device(s)")
-                        ensureTapWithDevices(for: app, deviceUIDs: availableUIDs)
+                        if let tap = taps[app.id], tap.currentDeviceUIDs != availableUIDs {
+                            let source = preferredTapSourceDeviceUID(forOutputUIDs: availableUIDs, isFollowsDefault: false)
+                            Task {
+                                guard self.taps[app.id] === tap,
+                                      self.getDeviceSelectionMode(for: app) == .multi,
+                                      self.getSelectedDeviceUIDs(for: app) == savedUIDs else { return }
+                                if await self.switchDeviceWithRetry(tap, to: availableUIDs, preferredTapSourceDeviceUID: source, multiDevice: true),
+                                   self.taps[app.id] === tap {
+                                    self.applyTapOutputState(to: tap, for: app.id, deviceUIDs: tap.currentDeviceUIDs)
+                                    self.applyAutoEQToTap(tap)
+                                }
+                            }
+                        } else {
+                            ensureTapWithDevices(for: app, deviceUIDs: availableUIDs)
+                        }
 
                         // Mark as applied if tap created successfully
                         guard taps[app.id] != nil else { continue }
@@ -227,7 +242,7 @@ extension AudioEngine {
                         // Apply volume (with boost) and mute
                         if savedVolume != nil {
                             if let tap = taps[app.id] {
-                                applyTapOutputState(to: tap, for: app.id, deviceUIDs: availableUIDs)
+                                applyTapOutputState(to: tap, for: app.id, deviceUIDs: tap.currentDeviceUIDs)
                             }
                         }
                         if let muted = savedMute, muted {
@@ -274,8 +289,11 @@ extension AudioEngine {
             if let existingTap = taps[app.id], existingTap.currentDeviceUIDs != [deviceUID] {
                 let preferredSource = preferredTapSourceDeviceUID(forOutputUIDs: [deviceUID], isFollowsDefault: followsDefault.contains(app.id))
                 Task {
-                    if await self.switchDeviceWithRetry(existingTap, to: [deviceUID], preferredTapSourceDeviceUID: preferredSource) {
-                        self.applyTapOutputState(to: existingTap, for: app.id, deviceUIDs: [deviceUID])
+                    guard self.taps[app.id] === existingTap,
+                          self.appDeviceRouting[app.id] == deviceUID else { return }
+                    if await self.switchDeviceWithRetry(existingTap, to: [deviceUID], preferredTapSourceDeviceUID: preferredSource),
+                       self.taps[app.id] === existingTap {
+                        self.applyTapOutputState(to: existingTap, for: app.id, deviceUIDs: existingTap.currentDeviceUIDs)
                         self.applyAutoEQToTap(existingTap)
                     }
                 }

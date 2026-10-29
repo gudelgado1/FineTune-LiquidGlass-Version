@@ -347,6 +347,7 @@ final class AudioEngine {
 
     /// Wire all event callbacks from monitors to AudioEngine handlers.
     private func wireCallbacks() {
+        settingsManager.onSettingsImported = { [weak self] in self?.synchronizeReplacedSettings() }
         // Sync device volume changes to taps for VU meter accuracy
         deviceVolumeMonitor.onVolumeChanged = { [weak self] deviceID, newVolume in
             guard let self else { return }
@@ -493,32 +494,41 @@ final class AudioEngine {
     /// Resets all persisted settings and synchronizes in-memory engine state.
     /// Active taps are kept alive but reverted to defaults (unity volume, unmuted, flat EQ).
     func handleSettingsReset() {
-        // 1. Clear persisted state
         settingsManager.resetAllSettings()
+        synchronizeReplacedSettings()
+    }
 
-        // 2. Clear in-memory routing and tracking state
+    /// Import/reset replace the stored snapshot. Drop PID caches and restore
+    /// both active apps and warm taps retained while their apps are paused.
+    func synchronizeReplacedSettings() {
+        let warmApps = taps.values.map { $0.app }
         appliedPIDs.removeAll()
         appDeviceRouting.removeAll()
         followsDefault.removeAll()
-
-        // 3. Clear cached per-app audio state
         volumeState.resetAll()
-
-        // 4. Refresh output state caches so software-backed devices reset to defaults.
         deviceVolumeMonitor.refreshOutputDeviceStates()
 
-        // 5. Push defaults to all active taps
-        for tap in taps.values {
-            applyTapOutputState(to: tap, for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
-            tap.updateEQSettings(.flat)
-            tap.updateAutoEQProfile(nil)
-            tap.updateLoudnessCompensation(volume: effectiveLoudnessVolume(for: tap), enabled: false)
+        for (pid, tap) in Array(taps) {
+            if settingsManager.isIgnored(tap.app.persistenceIdentifier) {
+                taps.removeValue(forKey: pid)
+                tap.invalidate()
+                continue
+            }
+            let identifier = tap.app.persistenceIdentifier
+            _ = volumeState.loadSavedVolume(for: pid, identifier: identifier)
+            _ = volumeState.loadSavedMute(for: pid, identifier: identifier)
+            _ = volumeState.loadSavedBoost(for: pid, identifier: identifier)
+            applyTapOutputState(to: tap, for: pid, deviceUIDs: tap.currentDeviceUIDs)
+            let dsp = initialDSPConfiguration(for: tap, deviceUIDs: tap.currentDeviceUIDs)
+            tap.updateEQSettings(dsp.eq)
+            tap.setAutoEQPreampEnabled(dsp.autoEQPreampEnabled)
+            tap.updateAutoEQProfile(dsp.autoEQProfile)
+            tap.updateLoudnessEqualization(dsp.loudnessEqualization)
+            tap.updateLoudnessCompensation(volume: dsp.loudnessVolume, enabled: dsp.loudnessCompensationEnabled)
+            if dsp.autoEQProfile == nil { applyAutoEQToTap(tap) }
         }
-
-        // 6. Re-apply from clean settings (re-establishes routing to system default)
-        applyPersistedSettings()
-
-        logger.info("Settings reset: engine state synchronized")
+        applyPersistedSettings(additionalApps: warmApps)
+        logger.info("Replaced settings: engine state synchronized")
     }
 
     func setVolume(for app: AudioApp, to volume: Float) {

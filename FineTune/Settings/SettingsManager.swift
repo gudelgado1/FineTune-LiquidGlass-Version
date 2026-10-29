@@ -9,6 +9,7 @@ import os
 @Observable
 @MainActor
 final class SettingsManager {
+    @ObservationIgnored var onSettingsImported: (() -> Void)?
     private var settings: Settings
     private var saveTask: Task<Void, Never>?
     private let loginService: any LaunchAtLoginManaging
@@ -868,7 +869,9 @@ final class SettingsManager {
     func importData(_ data: Data) throws {
         let imported = try JSONDecoder().decode(Settings.self, from: data)
         settings = imported
+        setLaunchAtLogin(imported.appSettings.launchAtLogin)
         scheduleSave()
+        onSettingsImported?()
         logger.info("Imported settings: \(self.settings.appVolumes.count) volumes, \(self.settings.appEQSettings.count) EQ settings, \(self.settings.appDeviceRouting.count) device routings")
     }
 
