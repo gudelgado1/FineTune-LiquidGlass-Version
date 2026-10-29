@@ -1,4 +1,5 @@
 import AudioToolbox
+import Foundation
 
 /// The clock used to configure the current render pipeline. Read on the control
 /// thread; the wake worker receives this value, never a live tap controller.
@@ -11,9 +12,8 @@ nonisolated struct TapRenderClock: Equatable, Sendable {
 ///
 /// **Threading:** Intentionally NOT `@MainActor`. Concrete implementations straddle
 /// the main thread (property access from AudioEngine) and the CoreAudio HAL I/O thread
-/// (audio processing callbacks). Thread safety for mutable properties (`volume`, `isMuted`,
-/// `currentDeviceVolume`, `isDeviceMuted`) is achieved via `nonisolated(unsafe)` atomic
-/// field access on the concrete type, not actor isolation.
+/// (audio processing callbacks). Concrete implementations must synchronize shared
+/// state; `nonisolated(unsafe)` alone does not provide atomic access or ownership.
 protocol ProcessTapControlling: AnyObject {
     var app: AudioApp { get }
     var volume: Float { get set }
@@ -26,6 +26,7 @@ protocol ProcessTapControlling: AnyObject {
     var renderClock: TapRenderClock? { get }
 
     func activate() throws
+    func activate(initialDSP: TapDSPConfiguration) throws
     func invalidate()
     func invalidateAsync() async
     func updateEQSettings(_ settings: EQSettings)
@@ -38,13 +39,11 @@ protocol ProcessTapControlling: AnyObject {
     func hasRecentAudioCallback(within seconds: Double) -> Bool
     func isHealthCheckEligible(minActiveSeconds: Double) -> Bool
 
-    /// True while the tap's underlying CoreAudio aggregate device is still alive
-    /// server-side. Returns false when `coreaudiod` has destroyed the aggregate
-    /// (restart under memory pressure, HAL reset, system overload) — the IO proc
-    /// is dead and will never fire again, so the tap must be recreated. This is a
-    /// *direct* resource-validity check, independent of callback timing, so it
-    /// catches taps that died before ever rendering a buffer.
-    var isResourceAlive: Bool { get }
+    /// Reads aggregate validity off control with a deadline. false means the
+    /// resource is definitively gone, true means no definitive death (including
+    /// transient HAL errors), nil means the read timed out or was not admitted.
+    /// Catches taps killed before their first callback too.
+    func checkResourceLiveness(timeout: TimeInterval) async -> Bool?
 
     /// Temporarily bypasses the per-callback DSP stack (EQ / AutoEQ / loudness)
     /// to shed CPU under memory/CPU pressure, reducing the chance of an IO-thread
@@ -57,6 +56,18 @@ protocol ProcessTapControlling: AnyObject {
 }
 
 extension ProcessTapControlling {
+    /// Compatibility path for adapters/mocks. Native taps build processors from
+    /// this state before registering/starting their IO proc.
+    func activate(initialDSP: TapDSPConfiguration) throws {
+        updateEQSettings(initialDSP.eq)
+        setAutoEQPreampEnabled(initialDSP.autoEQPreampEnabled)
+        updateAutoEQProfile(initialDSP.autoEQProfile)
+        updateLoudnessEqualization(initialDSP.loudnessEqualization)
+        updateLoudnessCompensation(volume: initialDSP.loudnessVolume, enabled: initialDSP.loudnessCompensationEnabled)
+        setDSPBypass(initialDSP.bypass)
+        try activate()
+    }
+
     var renderClock: TapRenderClock? { nil }
 
     /// Convenience: defaults sourceDeviceDead to false.
@@ -82,7 +93,7 @@ extension ProcessTapControlling {
     }
 
     /// Mocks are assumed alive unless they override this.
-    var isResourceAlive: Bool { true }
+    func checkResourceLiveness(timeout: TimeInterval) async -> Bool? { true }
 
     /// Default no-op for mocks that don't override.
     func setDSPBypass(_ bypass: Bool) {}

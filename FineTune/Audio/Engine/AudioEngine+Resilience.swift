@@ -100,35 +100,44 @@ extension AudioEngine {
     /// device-disconnect / priority-fallback path owns recovery — recreating on a
     /// dead device would just fail and burn the cooldown.
     func recreateDeadTaps() async {
-        guard !taps.isEmpty else { return }
-        // Every check below is HAL IPC. With the daemon wedged they would all
-        // hang, and recreating a tap would hang harder — the breaker's recovery
-        // probe is the only traffic allowed until the audio system answers.
-        guard audioSystemHealth.allowsPeriodicHALWork else { return }
-        let now = Date()
-
-        for (pid, tap) in taps {
-            // Fast path: a tap that rendered audio in the last second is provably
-            // alive — its IO proc is firing — so skip the HAL `isResourceAlive`
-            // IPC entirely. This keeps the common case (audio actively playing)
-            // free of coreaudiod queries, which matters most under the very
-            // overload this recovery exists to handle. `hasRecentAudioCallback`
-            // reads a lock-free host-time var; no IPC.
+        guard !taps.isEmpty, !livenessCheckInFlight,
+              audioSystemHealth.allowsPeriodicHALWork else { return }
+        livenessCheckInFlight = true
+        defer { livenessCheckInFlight = false }
+        let candidates = taps.map { (pid: $0.key, tap: $0.value) }
+        for (pid, tap) in candidates {
+            guard !Task.isCancelled, audioSystemHealth.allowsPeriodicHALWork else { return }
+            guard taps[pid] === tap else { continue }
             if tap.hasRecentAudioCallback(within: 1.0) { continue }
-            guard !tap.isResourceAlive else { continue }
-            if let cooldownEnd = tapRecoveryCooldownUntil[pid], now < cooldownEnd { continue }
-
-            let targetAlive = tap.currentDeviceUIDs.contains { uid in
-                guard let id = deviceMonitor.device(for: uid)?.id else { return false }
-                return isAliveCheck(id)
+            if let cooldownEnd = tapRecoveryCooldownUntil[pid], Date() < cooldownEnd { continue }
+            let routes = tap.currentDeviceUIDs
+            let clock = tap.renderClock
+            let alive = await tap.checkResourceLiveness(timeout: 2.0)
+            guard !Task.isCancelled, taps[pid] === tap,
+                  tap.currentDeviceUIDs == routes, tap.renderClock == clock else { continue }
+            guard let alive else {
+                audioSystemHealth.reportTimeout()
+                return
             }
-
+            audioSystemHealth.reportSuccess()
+            guard !alive else { continue }
+            let targetIDs = routes.compactMap { deviceMonitor.device(for: $0)?.id }
+            let targetAlive = await targetLivenessQuery(targetIDs)
+            guard !Task.isCancelled, taps[pid] === tap,
+                  tap.currentDeviceUIDs == routes, tap.renderClock == clock else { continue }
+            guard let targetAlive else {
+                audioSystemHealth.reportTimeout()
+                return
+            }
+            audioSystemHealth.reportSuccess()
+            // A callback or another recovery may have happened during the reads.
+            guard !tap.hasRecentAudioCallback(within: 1.0) else { continue }
+            if let cooldownEnd = tapRecoveryCooldownUntil[pid], Date() < cooldownEnd { continue }
             if targetAlive {
                 logger.warning("Liveness: tap for PID \(pid) has a dead aggregate device — recreating")
                 DiagnosticLog.log("liveness: pid=\(pid) aggregate dead, target alive — recreating")
                 await recreateTap(for: pid)
             } else {
-                logger.notice("Liveness: tap for PID \(pid) aggregate dead and target device(s) gone — deferring to device fallback")
                 DiagnosticLog.log("liveness: pid=\(pid) aggregate dead AND target device gone — deferring to device fallback")
             }
         }

@@ -229,15 +229,18 @@ final class ProcessTapController: ProcessTapControlling {
     /// failure under load returns `.unknown`, which we treat as alive — otherwise
     /// a healthy tap gets torn down and recreated on every load spike, cutting
     /// audio in a ~0.5–1 s recreate loop.
-    var isResourceAlive: Bool {
+    func checkResourceLiveness(timeout: TimeInterval) async -> Bool? {
         guard activated, !isSwitching, !_invalidating else { return true }
-        guard primaryResources.aggregateDeviceID.isValid else { return false }
-        switch primaryResources.aggregateDeviceID.deviceLiveness() {
-        case .alive, .unknown:
-            return true
-        case .dead:
-            return false
+        let aggregateID = primaryResources.aggregateDeviceID
+        guard aggregateID.isValid else { return false }
+        // Only an immutable ID crosses to the worker. The controller and its
+        // transition state remain on control; revalidate after suspension.
+        let alive: Bool? = await HALExecutor.run(timeout: timeout) {
+            aggregateID.deviceLiveness() != .dead
         }
+        guard activated, !isSwitching, !_invalidating,
+              primaryResources.aggregateDeviceID == aggregateID else { return true }
+        return alive
     }
 
     /// Toggles the per-callback DSP bypass (RT-safe atomic Bool write).
@@ -622,7 +625,9 @@ final class ProcessTapController: ProcessTapControlling {
         return (mixdownTap, mixdownTapID)
     }
 
-    func activate() throws {
+    func activate() throws { try activate(initialDSP: TapDSPConfiguration()) }
+
+    func activate(initialDSP: TapDSPConfiguration) throws {
         guard !activated else { return }
 
         logger.debug("Activating tap for \(self.app.name)")
@@ -680,10 +685,13 @@ final class ProcessTapController: ProcessTapControlling {
         rampCoefficient = Self.rampCoefficient(forSampleRate: sampleRate)
         logger.debug("Ramp coefficient: \(self.rampCoefficient)")
 
-        eqProcessor = EQProcessor(sampleRate: sampleRate)
-        autoEQProcessor = AutoEQProcessor(sampleRate: sampleRate)
-        loudnessEqualizerProcessor = LoudnessEqualizer(settings: LoudnessEqualizerSettings(), sampleRate: Float(sampleRate))
-        loudnessCompensator = LoudnessCompensator(sampleRate: sampleRate)
+        let processors = initialDSP.makeProcessors(sampleRate: sampleRate)
+        eqProcessor = processors.eq
+        autoEQProcessor = processors.autoEQ
+        loudnessEqualizerProcessor = processors.equalizer
+        loudnessCompensator = processors.compensator
+        _lastLoudnessVolume = initialDSP.loudnessVolume
+        _dspBypass = initialDSP.bypass
 
         // Create IO proc with gain processing
         let activateCallbackID = reservePrimaryCallbackID()

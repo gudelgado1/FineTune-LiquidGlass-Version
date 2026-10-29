@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		FA7000000000000000000001 /* Atomics in Frameworks */ = {isa = PBXBuildFile; productRef = FA7000000000000000000002 /* Atomics */; };
 		140F6FF7C7CD8F6C1D73121E /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = 75DA616DEB24648C4BDE9092 /* KeyboardShortcuts */; };
 		7980FFE92F261AA200AF5F85 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 79SPARK012F0600000008D52 /* Sparkle */; };
 		7988AE522F1CC55900E6D086 /* fineTuneIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 7988AE512F1CC55900E6D086 /* fineTuneIcon.icon */; };
@@ -76,6 +77,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FA7000000000000000000001 /* Atomics in Frameworks */,
 				79B1000B2F35000000000002 /* IOBluetooth.framework in Frameworks */,
 				7980FFE92F261AA200AF5F85 /* Sparkle in Frameworks */,
 				140F6FF7C7CD8F6C1D73121E /* KeyboardShortcuts in Frameworks */,
@@ -151,6 +153,7 @@
 			);
 			name = FineTune;
 			packageProductDependencies = (
+				FA7000000000000000000002 /* Atomics */,
 				79SPARK012F0600000008D52 /* Sparkle */,
 				75DA616DEB24648C4BDE9092 /* KeyboardShortcuts */,
 			);
@@ -237,6 +240,7 @@
 			mainGroup = 79A607A62F05C9E00008D52A;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				FA7000000000000000000003 /* swift-atomics */,
 				79SNAP0002F0600000008D52A /* XCRemoteSwiftPackageReference "swift-snapshot-testing" */,
 				79SPARK002F0600000008D52 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				25AD8733711702DDEA8EAD12 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
@@ -688,6 +692,11 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+        FA7000000000000000000003 /* swift-atomics */ = {
+            isa = XCRemoteSwiftPackageReference;
+            repositoryURL = "https://github.com/apple/swift-atomics";
+            requirement = { kind = exactVersion; version = 1.3.1; };
+        };
 		25AD8733711702DDEA8EAD12 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sindresorhus/KeyboardShortcuts";
@@ -715,6 +724,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+        FA7000000000000000000002 /* Atomics */ = {
+            isa = XCSwiftPackageProductDependency;
+            package = FA7000000000000000000003 /* swift-atomics */;
+            productName = Atomics;
+        };
 		75DA616DEB24648C4BDE9092 /* KeyboardShortcuts */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 25AD8733711702DDEA8EAD12 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */;

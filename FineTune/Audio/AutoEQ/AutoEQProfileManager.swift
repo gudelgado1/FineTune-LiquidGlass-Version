@@ -107,6 +107,15 @@ final class AutoEQProfileManager {
         }
     }
 
+    /// Resolve only data already on this Mac, before IO begins. Fetched profiles
+    /// otherwise depend on the background catalog task finishing after launch.
+    func profileForActivation(for id: String) -> AutoEQProfile? {
+        if let profile = profiles[id] { return profile }
+        guard let cached = fetcher.cachedProfile(for: id) else { return nil }
+        profiles[id] = cached
+        return cached
+    }
+
     /// Look up a profile by ID (only returns already-loaded profiles).
     func profile(for id: String) -> AutoEQProfile? {
         profiles[id]

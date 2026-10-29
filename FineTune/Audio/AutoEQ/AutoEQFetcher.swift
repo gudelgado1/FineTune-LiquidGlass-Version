@@ -301,6 +301,12 @@ final class AutoEQFetcher {
         }
     }
 
+    /// Local-only startup lookup; does not wait for catalog/network loading.
+    func cachedProfile(for id: String) -> AutoEQProfile? {
+        let entry = catalog.first { $0.id == id }
+        return loadCachedProfile(id: id, name: entry?.name ?? id, measuredBy: entry?.measuredBy ?? "AutoEQ")
+    }
+
     private func loadCachedProfile(id: String, name: String, measuredBy: String) -> AutoEQProfile? {
         let file = Self.fetchedProfilesDirectory.appendingPathComponent("\(id).txt")
         guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }

@@ -33,8 +33,7 @@ final class EQProcessor: BiquadProcessor, @unchecked Sendable {
         _currentSettings = settings
 
         guard settings.hasAudibleEffect else {
-            setEnabled(false)
-            swapSetup(nil)
+            installSetup(nil, enabled: false)
             return
         }
 
@@ -47,8 +46,7 @@ final class EQProcessor: BiquadProcessor, @unchecked Sendable {
             vDSP_biquad_CreateSetup(ptr.baseAddress!, vDSP_Length(EQSettings.bandCount))
         }
 
-        swapSetup(newSetup)
-        setEnabled(true)
+        installSetup(newSetup, enabled: newSetup != nil)
 
         // Note: Do NOT reset delay buffers here - the filter naturally adapts to new
         // coefficients using existing state, producing smooth transitions without clicks.

@@ -50,6 +50,24 @@ extension AudioEngine {
         }
     }
 
+    func initialDSPConfiguration(for tap: any ProcessTapControlling, deviceUIDs: [String]) -> TapDSPConfiguration {
+        var state = TapDSPConfiguration()
+        state.eq = settingsManager.getEQSettings(for: tap.app.persistenceIdentifier)
+        state.autoEQPreampEnabled = settingsManager.autoEQPreampEnabled
+        state.loudnessEqualization.enabled = settingsManager.appSettings.loudnessEqualizationEnabled
+        state.loudnessCompensationEnabled = settingsManager.appSettings.loudnessCompensationEnabled
+        state.loudnessVolume = effectiveLoudnessVolume(for: tap)
+        state.bypass = isDSPLoadShed
+        if let uid = deviceUIDs.first,
+           let selection = settingsManager.getAutoEQSelection(for: uid), selection.isEnabled {
+            state.autoEQProfile = autoEQProfileManager.profileForActivation(for: selection.profileID)
+            if state.autoEQProfile == nil {
+                DiagnosticLog.log("tap: AutoEQ profile unavailable locally for \(tap.app.id); correction awaits resolution")
+            }
+        }
+        return state
+    }
+
     /// Creates a tap with the specified device UIDs
     func ensureTapWithDevices(for app: AudioApp, deviceUIDs: [String]) {
         guard captureRebuildTask == nil else { return }
@@ -71,24 +89,11 @@ extension AudioEngine {
             let tap = try tapFactory(app, deviceUIDs, preferredTapSourceUID)
             applyTapOutputState(to: tap, for: app.id, deviceUIDs: deviceUIDs)
 
-            try tap.activate()
+            let initialDSP = initialDSPConfiguration(for: tap, deviceUIDs: deviceUIDs)
+            try tap.activate(initialDSP: initialDSP)
             taps[app.id] = tap
-            // A tap created while load-shedding is active must start bypassed too,
-            // otherwise a tap recreated mid-pressure would re-introduce DSP cost.
-            if isDSPLoadShed { tap.setDSPBypass(true) }
-
-            // Load and apply persisted EQ settings
-            let eqSettings = settingsManager.getEQSettings(for: app.persistenceIdentifier)
-            tap.updateEQSettings(eqSettings)
-            tap.setAutoEQPreampEnabled(settingsManager.autoEQPreampEnabled)
-            applyAutoEQToTap(tap)
-            var loudnessEqSettings = LoudnessEqualizerSettings()
-            loudnessEqSettings.enabled = settingsManager.appSettings.loudnessEqualizationEnabled
-            tap.updateLoudnessEqualization(loudnessEqSettings)
-            tap.updateLoudnessCompensation(
-                volume: effectiveLoudnessVolume(for: tap),
-                enabled: settingsManager.appSettings.loudnessCompensationEnabled
-            )
+            // Retry an unavailable profile asynchronously after publication.
+            if initialDSP.autoEQProfile == nil { applyAutoEQToTap(tap) }
 
             logger.debug("Created tap for \(app.name) on \(deviceUIDs.count) device(s)")
         } catch {
@@ -113,24 +118,11 @@ extension AudioEngine {
             let tap = try tapFactory(app, [deviceUID], preferredTapSourceUID)
             applyTapOutputState(to: tap, for: app.id, deviceUIDs: [deviceUID])
 
-            try tap.activate()
+            let initialDSP = initialDSPConfiguration(for: tap, deviceUIDs: [deviceUID])
+            try tap.activate(initialDSP: initialDSP)
             taps[app.id] = tap
-            // A tap created while load-shedding is active must start bypassed too,
-            // otherwise a tap recreated mid-pressure would re-introduce DSP cost.
-            if isDSPLoadShed { tap.setDSPBypass(true) }
-
-            // Load and apply persisted EQ settings
-            let eqSettings = settingsManager.getEQSettings(for: app.persistenceIdentifier)
-            tap.updateEQSettings(eqSettings)
-            tap.setAutoEQPreampEnabled(settingsManager.autoEQPreampEnabled)
-            applyAutoEQToTap(tap)
-            var loudnessEqSettings = LoudnessEqualizerSettings()
-            loudnessEqSettings.enabled = settingsManager.appSettings.loudnessEqualizationEnabled
-            tap.updateLoudnessEqualization(loudnessEqSettings)
-            tap.updateLoudnessCompensation(
-                volume: effectiveLoudnessVolume(for: tap),
-                enabled: settingsManager.appSettings.loudnessCompensationEnabled
-            )
+            // Retry an unavailable profile asynchronously after publication.
+            if initialDSP.autoEQProfile == nil { applyAutoEQToTap(tap) }
 
             logger.debug("Created tap for \(app.name)")
             DiagnosticLog.log("tap: created for \(app.name)#\(app.id) on \(deviceUID)")
@@ -462,7 +454,8 @@ extension AudioEngine {
             let preferredTapSourceUID = resolvedSourceUID ?? (routingUnchanged ? previousSourceUID : nil)
             let tap = try tapFactory(app, deviceUIDs, preferredTapSourceUID)
             applyTapOutputState(to: tap, for: app.id, deviceUIDs: deviceUIDs)
-            try tap.activate()
+            let initialDSP = initialDSPConfiguration(for: tap, deviceUIDs: deviceUIDs)
+            try tap.activate(initialDSP: initialDSP)
             // activate() pumps the run loop while waiting for HAL readiness,
             // so lifecycle invalidation can also happen before publication.
             guard tapRecreationTokens[pid] == recreationToken, !Task.isCancelled, taps[pid] == nil else {
@@ -470,21 +463,8 @@ extension AudioEngine {
                 return
             }
             taps[app.id] = tap
-            // A tap created while load-shedding is active must start bypassed too,
-            // otherwise a tap recreated mid-pressure would re-introduce DSP cost.
-            if isDSPLoadShed { tap.setDSPBypass(true) }
-
-            let eqSettings = settingsManager.getEQSettings(for: app.persistenceIdentifier)
-            tap.updateEQSettings(eqSettings)
-            tap.setAutoEQPreampEnabled(settingsManager.autoEQPreampEnabled)
-            applyAutoEQToTap(tap)
-            var loudnessEqSettings = LoudnessEqualizerSettings()
-            loudnessEqSettings.enabled = settingsManager.appSettings.loudnessEqualizationEnabled
-            tap.updateLoudnessEqualization(loudnessEqSettings)
-            tap.updateLoudnessCompensation(
-                volume: effectiveLoudnessVolume(for: tap),
-                enabled: settingsManager.appSettings.loudnessCompensationEnabled
-            )
+            // Retry an unavailable profile asynchronously after publication.
+            if initialDSP.autoEQProfile == nil { applyAutoEQToTap(tap) }
 
             if let firstDeviceUID = deviceUIDs.first {
                 appDeviceRouting[app.id] = firstDeviceUID

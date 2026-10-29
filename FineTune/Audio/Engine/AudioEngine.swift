@@ -27,6 +27,8 @@ final class AudioEngine {
 
     /// Closure to check if a device is alive. Overridable for testing.
     let isAliveCheck: (AudioDeviceID) -> Bool
+    let targetLivenessQuery: @MainActor ([AudioDeviceID]) async -> Bool?
+    @ObservationIgnored var livenessCheckInFlight = false
 
     /// Whether a device's audio dies with the display (DisplayPort/HDMI).
     /// Overridable for testing. Used by the screens-wake force rebuild: a
@@ -176,6 +178,15 @@ final class AudioEngine {
         self.autoEQProfileManager = autoEQProfileManager ?? AutoEQProfileManager()
         self.volumeState = VolumeState(settingsManager: manager)
         self.isAliveCheck = isAlive ?? { $0.isDeviceAlive() }
+        if let isAlive {
+            self.targetLivenessQuery = { ids in ids.contains(where: isAlive) }
+        } else {
+            self.targetLivenessQuery = { ids in
+                await HALExecutor.run(timeout: 2.0) {
+                    ids.contains { $0.deviceLiveness() == .alive }
+                }
+            }
+        }
         self.liveProcessObjectIDs = liveProcessObjects ?? { Set((try? AudioObjectID.readProcessList()) ?? []) }
         self.wakeRecoveryQuery = wakeRecoveryQuery ?? WakeRecoverySnapshot.read
         self.wakeRecoveryTimeout = wakeRecoveryTimeout
@@ -723,7 +734,7 @@ final class AudioEngine {
         Task { @MainActor in
             guard let profile = await autoEQProfileManager.resolveProfile(for: selection.profileID) else { return }
             // Verify tap still exists and is still routed to the same device
-            guard tap.currentDeviceUID == deviceUID else { return }
+            guard taps[tap.app.id] === tap, tap.currentDeviceUID == deviceUID else { return }
             guard let latestSelection = settingsManager.getAutoEQSelection(for: deviceUID),
                   latestSelection.profileID == selection.profileID,
                   latestSelection.isEnabled else { return }

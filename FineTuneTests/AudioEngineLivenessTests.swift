@@ -40,6 +40,7 @@ private final class LivenessTap: ProcessTapControlling {
     private(set) var activateCallCount = 0
     private(set) var invalidateAsyncCallCount = 0
     var onInvalidateAsync: (() async -> Void)?
+    var onLivenessCheck: (() async -> Bool?)?
 
     init(app: AudioApp, deviceUIDs: [String], resourceAlive: Bool = true) {
         self.app = app
@@ -47,7 +48,10 @@ private final class LivenessTap: ProcessTapControlling {
         self.resourceAlive = resourceAlive
     }
 
-    var isResourceAlive: Bool { resourceAlive }
+    func checkResourceLiveness(timeout: TimeInterval) async -> Bool? {
+        if let onLivenessCheck { return await onLivenessCheck() }
+        return resourceAlive
+    }
     func setDSPBypass(_ bypass: Bool) { dspBypass = bypass }
 
     func activate() throws { activateCallCount += 1 }
@@ -79,6 +83,44 @@ private final class LivenessTap: ProcessTapControlling {
 @Suite("AudioEngine — tap liveness recovery", .serialized)
 @MainActor
 struct AudioEngineLivenessTests {
+    @Test("a suspended liveness read cannot recreate a replaced tap")
+    func replacedTapDiscardsOldLivenessResult() async {
+        let app = makeApp(pid: 71901)
+        let device = makeDevice(id: 791, uid: "spk", name: "Speaker")
+        let h = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            LivenessTap(app: app, deviceUIDs: uids)
+        }
+        let old = LivenessTap(app: app, deviceUIDs: [device.uid], resourceAlive: false)
+        let replacement = LivenessTap(app: app, deviceUIDs: [device.uid])
+        old.onLivenessCheck = {
+            h.engine.taps[app.id] = replacement
+            await Task.yield()
+            return false
+        }
+        h.engine.taps[app.id] = old
+        await h.engine.recreateDeadTaps()
+        #expect(h.engine.taps[app.id] === replacement)
+        #expect(old.invalidateAsyncCallCount == 0)
+        #expect(replacement.invalidateAsyncCallCount == 0)
+    }
+
+    @Test("liveness timeout preserves the tap and reaches the circuit breaker")
+    func livenessTimeoutPreservesTap() async {
+        let app = makeApp(pid: 71902)
+        let device = makeDevice(id: 792, uid: "spk", name: "Speaker")
+        let h = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            LivenessTap(app: app, deviceUIDs: uids)
+        }
+        let tap = LivenessTap(app: app, deviceUIDs: [device.uid], resourceAlive: false)
+        tap.onLivenessCheck = { nil }
+        h.engine.taps[app.id] = tap
+        await h.engine.recreateDeadTaps()
+        await h.engine.recreateDeadTaps()
+        #expect(h.engine.taps[app.id] === tap)
+        #expect(tap.invalidateAsyncCallCount == 0)
+        #expect(h.engine.audioSystemHealth.state == .unresponsive)
+    }
+
     @Test("dead aggregate + alive device → tap is recreated on the same route")
     func deadAggregateWithAliveDeviceRecreates() async {
         let app = makeApp(pid: 71001)
@@ -250,7 +292,10 @@ struct AudioEngineLivenessTests {
         // Engine wires onDeviceListChanged in init even with monitors off.
         // The trigger is debounced ~400 ms, so wait past that before asserting.
         harness.deviceMonitor.onDeviceListChanged?()
-        try? await Task.sleep(for: .milliseconds(700))
+        for _ in 0..<200 {
+            if replacement != nil { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
 
         #expect(replacement != nil)
         #expect(harness.engine.taps[app.id] === replacement)

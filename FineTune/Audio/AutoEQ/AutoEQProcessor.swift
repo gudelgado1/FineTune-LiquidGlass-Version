@@ -18,12 +18,6 @@ final class AutoEQProcessor: BiquadProcessor, @unchecked Sendable {
     /// Whether to apply the profile's preamp (false = bypass preamp, rely on limiter)
     private var _preampEnabled: Bool = true
 
-    /// Preamp gain in linear scale (RT-safe atomic read in process)
-    private nonisolated(unsafe) var _preampGain: Float = 1.0
-
-    /// Number of active filter sections (diagnostic)
-    private nonisolated(unsafe) var _filterCount: UInt = 0
-
     init(sampleRate: Double) {
         super.init(
             sampleRate: sampleRate,
@@ -43,10 +37,7 @@ final class AutoEQProcessor: BiquadProcessor, @unchecked Sendable {
         let validated = profile?.validated()
         guard let validated, !validated.filters.isEmpty else {
             // Disable: atomic writes
-            setEnabled(false)
-            _filterCount = 0
-            _preampGain = 1.0
-            swapSetup(nil)
+            installSetup(nil, enabled: false)
             logger.info("AutoEQ disabled — \(profile == nil ? "nil profile" : "no valid filters after validation")")
             return
         }
@@ -69,10 +60,7 @@ final class AutoEQProcessor: BiquadProcessor, @unchecked Sendable {
         let preampLinear = _preampEnabled ? powf(10.0, validated.preampDB / 20.0) : 1.0
 
         // Atomic state update + setup swap
-        _preampGain = preampLinear
-        _filterCount = UInt(filters.count)
-        swapSetup(newSetup)
-        setEnabled(true)
+        installSetup(newSetup, enabled: true, preamp: preampLinear)
 
         let preampStatus = self._preampEnabled ? "active" : "bypassed"
         logger.info("AutoEQ applied: \"\(validated.name)\" — \(filters.count) filters, preamp \(validated.preampDB, format: .fixed(precision: 1)) dB (\(preampStatus)), gain \(preampLinear, format: .fixed(precision: 3))x, rate \(self.sampleRate, format: .fixed(precision: 0)) Hz")
@@ -106,10 +94,4 @@ final class AutoEQProcessor: BiquadProcessor, @unchecked Sendable {
         return (coefficients, profile.filters.count)
     }
 
-    /// Apply preamp gain before the biquad cascade (RT-safe).
-    override func preProcess(output: UnsafeMutablePointer<Float>, frameCount: Int) {
-        var preamp = _preampGain
-        let sampleCount = frameCount * 2
-        vDSP_vsmul(output, 1, &preamp, output, 1, vDSP_Length(sampleCount))
-    }
 }

@@ -35,6 +35,16 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-packages-${{ hashFiles('FineTune.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
       - name: Run all unit tests in the isolated host
         run: python3 scripts/run-tests.py --build-dir build/ci
+      - name: Check DSP with Thread Sanitizer
+        run: |
+          python3 scripts/run-dsp-checks.py --sanitizer thread \
+            --build-dir build/ci/dsp-thread \
+            --atomics-path build/ci/SourcePackages/checkouts/swift-atomics > build/ci/dsp-thread.log 2>&1
+      - name: Check DSP with Address Sanitizer
+        run: |
+          python3 scripts/run-dsp-checks.py --sanitizer address \
+            --build-dir build/ci/dsp-address \
+            --atomics-path build/ci/SourcePackages/checkouts/swift-atomics > build/ci/dsp-address.log 2>&1
       - name: Build optimized Release
         run: |
           xcodebuild build \
@@ -52,5 +62,9 @@ jobs:
           path: |
             build/ci/runs/
             build/ci/release.log
+            build/ci/dsp-thread.log
+            build/ci/dsp-address.log
+            build/ci/dsp-thread/source-hashes.json
+            build/ci/dsp-address/source-hashes.json
           if-no-files-found: warn
           retention-days: 14
