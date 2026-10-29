@@ -214,6 +214,7 @@ extension MenuBarPopupView {
                     toggleEQ(for: displayableApp.id, scrollProxy: scrollProxy)
                 },
                 isFocused: hasKeyboardEngaged && selectedRow == .app(persistenceID: displayableApp.id),
+                textEntry: textEntry,
                 isMediaTarget: isMediaTarget(bundleID: app.bundleID),
                 onToggleMediaTarget: { toggleMediaTarget(bundleID: app.bundleID) }
             )
@@ -283,6 +284,7 @@ extension MenuBarPopupView {
                 toggleEQ(for: displayableApp.id, scrollProxy: scrollProxy)
             },
             isFocused: hasKeyboardEngaged && selectedRow == .app(persistenceID: displayableApp.id),
+            textEntry: textEntry,
             isMediaTarget: isMediaTarget(bundleID: info.bundleID),
             onToggleMediaTarget: { toggleMediaTarget(bundleID: info.bundleID) }
         )

@@ -65,6 +65,8 @@ final class AudioEngine {
     /// `ensureTap*` skip PIDs in this set to close that race. `@ObservationIgnored`
     /// — pure coordination state, never observed by the UI.
     @ObservationIgnored var pidsBeingRecreated: Set<pid_t> = []
+    /// Ownership of each asynchronous recreation; reset/stop invalidates old work.
+    @ObservationIgnored var tapRecreationTokens: [pid_t: UUID] = [:]
     /// PIDs whose *initial* tap creation is in flight. `activate()` blocks the
     /// main thread in `waitUntilReady`, which pumps a nested run loop to process
     /// HAL events — and a nested run loop also drains the main queue, so a
@@ -73,10 +75,17 @@ final class AudioEngine {
     /// tap lands in `taps`. Without this guard that created a duplicate tap whose
     /// aggregate device leaked. Mirror of `pidsBeingRecreated` for creation.
     @ObservationIgnored var pidsBeingCreated: Set<pid_t> = []
+    @ObservationIgnored var captureRebuildTask: Task<Int?, Never>?
+    @ObservationIgnored var pendingTapTeardowns: [UUID: Task<Void, Never>] = [:]
     /// Reads the HAL's registered audio process objects. Injectable for tests.
     /// Used to distinguish a *paused* app (process objects still registered)
     /// from a *quit* app in warm-tap retention and post-wake recovery.
     let liveProcessObjectIDs: () -> Set<AudioObjectID>
+    /// Wake queries run on a HAL worker using only immutable device IDs.
+    let wakeRecoveryQuery: @Sendable ([AudioDeviceID]) -> WakeRecoverySnapshot?
+    let wakeRecoveryTimeout: TimeInterval
+    @ObservationIgnored var wakeRecoveryQueryInFlight = false
+    @ObservationIgnored var wakeRecoveryGeneration: UInt64 = 0
     var diagnostics = AudioEngineDiagnostics()
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "AudioEngine")
 
@@ -157,6 +166,8 @@ final class AudioEngine {
         isAlive: ((AudioDeviceID) -> Bool)? = nil,
         liveProcessObjects: (() -> Set<AudioObjectID>)? = nil,
         isDisplayTransport: ((AudioDeviceID) -> Bool)? = nil,
+        wakeRecoveryQuery: (@Sendable ([AudioDeviceID]) -> WakeRecoverySnapshot?)? = nil,
+        wakeRecoveryTimeout: TimeInterval = 4.0,
         startMonitorsAutomatically: Bool = true
     ) {
         self.permission = permission ?? AudioRecordingPermission()
@@ -166,6 +177,8 @@ final class AudioEngine {
         self.volumeState = VolumeState(settingsManager: manager)
         self.isAliveCheck = isAlive ?? { $0.isDeviceAlive() }
         self.liveProcessObjectIDs = liveProcessObjects ?? { Set((try? AudioObjectID.readProcessList()) ?? []) }
+        self.wakeRecoveryQuery = wakeRecoveryQuery ?? WakeRecoverySnapshot.read
+        self.wakeRecoveryTimeout = wakeRecoveryTimeout
         self.isDisplayTransport = isDisplayTransport ?? {
             let transport = $0.readTransportType()
             return transport == .displayPort || transport == .hdmi
@@ -440,8 +453,11 @@ final class AudioEngine {
     }
 
     func stop() {
+        captureRebuildTask?.cancel()
         stopHealthMonitor()
         stopResilienceObservers()
+        tapRecreationTokens.removeAll()
+        pidsBeingRecreated.removeAll()
         audioSystemHealth.stop()
         processMonitor.stop()
         deviceMonitor.stop()

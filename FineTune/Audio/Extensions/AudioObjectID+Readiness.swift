@@ -8,7 +8,7 @@ extension AudioObjectID {
     /// Check if an audio device is currently alive and operational.
     /// Uses kAudioDevicePropertyDeviceIsAlive to verify device state.
     /// - Returns: `true` if device is alive, `false` if dead or query fails.
-    func isDeviceAlive() -> Bool {
+    nonisolated func isDeviceAlive() -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsAlive,
             mScope: kAudioObjectPropertyScopeGlobal,

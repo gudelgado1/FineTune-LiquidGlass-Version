@@ -2,8 +2,8 @@
 // Tests for HUDWindowController: position math, hide-timer reset semantics,
 // style-specific hide delay, and popup-guard behavior.
 //
-// NSPanel/NSScreen creation is avoided — position math is tested via the pure
-// static method, and timer behavior is tested via the hideDelayOverride hook.
+// Position tests are pure. The controller tests create AppKit panels; actual
+// focus, mouse delivery and timer behavior are covered in HUDInteractionTests.
 
 import Testing
 import Foundation
@@ -134,7 +134,9 @@ struct HUDWindowControllerTimerTests {
         let popup = PopupVisibilityService()
         popup.isVisible = popupVisible
         let hud = HUDWindowController(settingsManager: settings, mediaKeyStatus: status, popupVisibility: popup)
-        // Stub out frame to avoid real NSScreen in tests.
+        hud.fullscreenProvider = { false }
+        hud.observesOutsideClicks = false
+        // Supply deterministic geometry without relying on the foreground app.
         hud.frameProvider = { NSRect(x: 0, y: 23, width: 1440, height: 877) }
         return hud
     }

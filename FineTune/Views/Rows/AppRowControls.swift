@@ -18,6 +18,8 @@ struct AppRowControls: View {
     /// ExpandableGlassRow hover. This ensures the full row hit-area triggers
     /// the percentage reveal — not just the narrow controls HStack.
     let isParentHovered: Bool
+    var isRowFocused: Bool = false
+    var textEntry: PopupTextEntryCoordinator? = nil
     let onVolumeChange: (Float) -> Void
     let onMuteChange: (Bool) -> Void
     let onBoostChange: (BoostLevel) -> Void
@@ -153,7 +155,9 @@ struct AppRowControls: View {
                 range: 0...100,
                 onEditingChanged: { editing in
                     withAnimation(DesignTokens.Animation.hover) { isPercentageEditing = editing }
-                }
+                },
+                isRowFocused: isRowFocused,
+                textEntry: textEntry
             )
             .opacity(showPercentage ? 1 : 0)
             .frame(width: showPercentage ? DesignTokens.Dimensions.percentageWidth : 0)

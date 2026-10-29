@@ -129,8 +129,8 @@ struct FineTuneApp: App {
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
 
         let window = SettingsPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
-            styleMask: [.borderless, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -141,7 +141,7 @@ struct FineTuneApp: App {
         window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenAuxiliary]
-        window.minSize = NSSize(width: 860, height: 580)
+        window.minSize = NSSize(width: 920, height: 640)
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

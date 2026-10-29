@@ -1,6 +1,7 @@
 import AppKit
 import AudioToolbox
 import Foundation
+import os
 import Testing
 @testable import FineTune
 
@@ -169,8 +170,9 @@ struct AudioProcessMonitorTests {
         var payload = [(AudioObjectID(1), pid_t(100), "com.test.alpha")]
 
         monitor.enumerate = { _, _ in
+            let snapshot = payload
             await gate.wait()
-            return Self.enumeration(payload)
+            return Self.enumeration(snapshot)
         }
 
         monitor.refreshNow()
@@ -213,6 +215,171 @@ struct AudioProcessMonitorTests {
 
         // 1 original + exactly 1 coalesced follow-up — never 21 passes.
         #expect(gate.callCount == 2)
+    }
+
+    // MARK: - Lifecycle
+
+    @Test("stop discards an in-flight result and its queued refresh")
+    func stopDiscardsPendingEnumeration() async {
+        let monitor = makeMonitor()
+        let gate = EnumerationGate()
+        var notifications = 0
+        monitor.onAppsChanged = { _ in notifications += 1 }
+        monitor.enumerate = { _, _ in
+            await gate.wait()
+            return Self.enumeration([(1, 100, "com.test.old")])
+        }
+
+        monitor.refreshNow()
+        await settle()
+        #expect(gate.isSuspended)
+        monitor.refreshNow() // queued behind the old enumeration
+        monitor.stop()
+        gate.release()
+        await settle()
+        monitor.refreshNow() // a stopped monitor stays stopped until start()
+        await settle()
+
+        #expect(monitor.activeApps.isEmpty)
+        #expect(notifications == 0)
+        #expect(gate.callCount == 1)
+    }
+
+    @Test("an old timeout cannot change health after stop")
+    func stoppedEnumerationDoesNotReportTimeout() async {
+        let monitor = makeMonitor()
+        let health = AudioSystemHealth()
+        monitor.health = health
+        health.reportTimeout()
+        let gate = EnumerationGate()
+        monitor.enumerate = { _, _ in
+            await gate.wait()
+            return nil
+        }
+
+        monitor.refreshNow()
+        await settle()
+        monitor.stop()
+        gate.release()
+        await settle()
+
+        #expect(health.state == .responsive, "the stopped pass must not trip the breaker")
+        health.stop()
+    }
+
+    @Test("restart begins a fresh enumeration and old results cannot clear its in-flight state")
+    func restartIsolatesPendingEnumerations() async {
+        let monitor = makeMonitor()
+        defer { monitor.stop() }
+        let oldGate = EnumerationGate()
+        let newGate = EnumerationGate()
+        var calls = 0
+        var published: [String] = []
+        monitor.onAppsChanged = { apps in published.append(contentsOf: apps.compactMap(\.bundleID)) }
+        monitor.enumerate = { _, _ in
+            calls += 1
+            if calls == 1 {
+                await oldGate.wait()
+                return Self.enumeration([(1, 100, "com.test.old")])
+            }
+            await newGate.wait()
+            return Self.enumeration([(2, 200, "com.test.new")])
+        }
+
+        monitor.start()
+        await settle()
+        #expect(oldGate.isSuspended)
+        monitor.stop()
+        monitor.start()
+        await settle()
+        #expect(newGate.isSuspended, "restart must not wait for the old IPC")
+
+        oldGate.release()
+        await settle()
+        #expect(monitor.activeApps.isEmpty)
+        monitor.refreshNow()
+        await settle()
+        #expect(calls == 2, "the old completion must not clear the new in-flight guard")
+
+        newGate.release()
+        await settle()
+        #expect(calls == 3, "the new generation must still serve its queued refresh")
+        newGate.release()
+        await settle()
+        #expect(published == ["com.test.new"])
+        #expect(monitor.activeApps.first?.processObjectIDs == [2])
+    }
+
+    @Test("an old result finishing after the replacement cannot overwrite it")
+    func oldEnumerationCannotOverwriteRestartedMonitor() async {
+        let monitor = makeMonitor()
+        defer { monitor.stop() }
+        let gate = EnumerationGate()
+        monitor.enumerate = { _, _ in
+            await gate.wait()
+            return Self.enumeration([(1, 100, "com.test.old")])
+        }
+        monitor.start()
+        await settle()
+        monitor.stop()
+        monitor.enumerate = { _, _ in Self.enumeration([(2, 200, "com.test.new")]) }
+        monitor.start()
+        await settle()
+        #expect(monitor.activeApps.first?.bundleID == "com.test.new")
+
+        gate.release()
+        await settle()
+        #expect(monitor.activeApps.first?.bundleID == "com.test.new")
+        #expect(monitor.activeApps.first?.processObjectIDs == [2])
+    }
+
+    @Test("a cancelled listener never starts registration")
+    func cancelledListenerDoesNotRegister() async {
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let registration = AudioProcessListenerRegistration(
+            add: { calls.withLock { $0 += 1 }; return noErr },
+            remove: { calls.withLock { $0 += 1 }; return noErr }
+        )
+        registration.cancel()
+        let status = await Task.detached { registration.install() }.value
+
+        #expect(status == noErr)
+        #expect(calls.withLock { $0 } == 0)
+    }
+
+    @Test("cancelling an in-flight listener removes it after registration completes")
+    func cancelledPendingListenerRemovesLateRegistration() async {
+        let registered = OSAllocatedUnfairLock(initialState: false)
+        let removals = OSAllocatedUnfairLock(initialState: 0)
+        let addStarted = OSAllocatedUnfairLock(initialState: false)
+        let releaseAdd = DispatchSemaphore(value: 0)
+        let registration = AudioProcessListenerRegistration(
+            add: {
+                addStarted.withLock { $0 = true }
+                releaseAdd.wait()
+                registered.withLock { $0 = true }
+                return noErr
+            },
+            remove: {
+                registered.withLock { $0 = false }
+                removals.withLock { $0 += 1 }
+                return noErr
+            }
+        )
+        let install = Task.detached { registration.install() }
+        for _ in 0..<100 where !addStarted.withLock({ $0 }) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(addStarted.withLock { $0 })
+        registration.cancel()
+        registration.cancel() // teardown is idempotent even while Add is blocked
+        #expect(removals.withLock { $0 } == 0, "removal must wait until Add finishes")
+        releaseAdd.signal()
+        let status = await install.value
+
+        #expect(status == noErr)
+        #expect(!registered.withLock { $0 })
+        #expect(removals.withLock { $0 } == 1)
     }
 
     // MARK: - Circuit breaker

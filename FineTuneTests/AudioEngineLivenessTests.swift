@@ -1,6 +1,7 @@
 import AppKit
 import AudioToolbox
 import Foundation
+import os
 import Testing
 @testable import FineTune
 
@@ -29,6 +30,7 @@ private final class LivenessTap: ProcessTapControlling {
     var currentDeviceUID: String? { currentDeviceUIDs.first }
     var currentDeviceUIDs: [String]
     var tapSourceDeviceUID: String?
+    var renderClock: TapRenderClock?
 
     var resourceAlive: Bool
     /// Independent from `resourceAlive` so tests can exercise the
@@ -37,6 +39,7 @@ private final class LivenessTap: ProcessTapControlling {
     private(set) var dspBypass = false
     private(set) var activateCallCount = 0
     private(set) var invalidateAsyncCallCount = 0
+    var onInvalidateAsync: (() async -> Void)?
 
     init(app: AudioApp, deviceUIDs: [String], resourceAlive: Bool = true) {
         self.app = app
@@ -49,7 +52,10 @@ private final class LivenessTap: ProcessTapControlling {
 
     func activate() throws { activateCallCount += 1 }
     func invalidate() {}
-    func invalidateAsync() async { invalidateAsyncCallCount += 1 }
+    func invalidateAsync() async {
+        invalidateAsyncCallCount += 1
+        await onInvalidateAsync?()
+    }
     func updateEQSettings(_ settings: EQSettings) {}
     func updateAutoEQProfile(_ profile: AutoEQProfile?) {}
     func setAutoEQPreampEnabled(_ enabled: Bool) {}
@@ -643,6 +649,252 @@ struct AudioEngineLivenessTests {
         #expect(harness.engine.taps[app.id] != nil)
     }
 
+    // MARK: - Wake query isolation
+
+    @Test("wake skips all queries while the breaker is open, including with no taps")
+    func wakeSkipsUnavailableHAL() async {
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let app = makeApp(pid: 71040)
+        let device = makeDevice(id: 740, uid: "display", name: "Display")
+        let harness = makeHarness(
+            app: app, devices: [device], aliveIDs: [740],
+            wakeRecoveryQuery: { _ in
+                calls.withLock { $0 += 1 }
+                return WakeRecoverySnapshot(liveProcessObjectIDs: [], aliveDeviceIDs: [740], displayDeviceIDs: [740])
+            }
+        ) { app, uids, _ in LivenessTap(app: app, deviceUIDs: uids) }
+        let tap = LivenessTap(app: app, deviceUIDs: [device.uid])
+        harness.engine.taps[app.id] = tap
+        harness.engine.audioSystemHealth.reportTimeout()
+        harness.engine.audioSystemHealth.reportTimeout()
+        defer { harness.engine.audioSystemHealth.stop() }
+
+        let rebuilt = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: false)
+        await harness.engine.rebuildActiveTapsAfterWake()
+        #expect(rebuilt.isEmpty)
+        #expect(harness.engine.taps[app.id] === tap)
+        #expect(tap.invalidateAsyncCallCount == 0)
+        harness.engine.taps.removeAll()
+        await harness.engine.rebuildActiveTapsAfterWake()
+        #expect(calls.withLock { $0 } == 0)
+    }
+
+    @Test("wake does not query HAL when there are no taps")
+    func emptyWakeSkipsHAL() async {
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let app = makeApp(pid: 71041)
+        let harness = makeHarness(
+            app: app, devices: [], aliveIDs: [],
+            wakeRecoveryQuery: { _ in calls.withLock { $0 += 1 }; return nil }
+        ) { app, uids, _ in LivenessTap(app: app, deviceUIDs: uids) }
+        _ = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: false)
+        await harness.engine.rebuildActiveTapsAfterWake()
+        #expect(calls.withLock { $0 } == 0)
+    }
+
+    @Test("blocked wake queries run off-main, time out, and preserve existing taps")
+    func wakeQueryDeadlinePreservesTaps() async {
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal(); gate.signal() }
+        let app = makeApp(pid: 71042)
+        let device = makeDevice(id: 742, uid: "display", name: "Display")
+        let harness = makeHarness(
+            app: app, devices: [device], aliveIDs: [742],
+            wakeRecoveryQuery: { _ in
+                #expect(!Thread.isMainThread)
+                calls.withLock { $0 += 1 }
+                gate.wait()
+                return WakeRecoverySnapshot(liveProcessObjectIDs: [], aliveDeviceIDs: [742], displayDeviceIDs: [742])
+            },
+            wakeRecoveryTimeout: 0.1
+        ) { app, uids, _ in LivenessTap(app: app, deviceUIDs: uids) }
+        let tap = LivenessTap(app: app, deviceUIDs: [device.uid])
+        harness.engine.taps[app.id] = tap
+        defer { harness.engine.audioSystemHealth.stop() }
+
+        let rebuilt = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: false)
+        await harness.engine.rebuildActiveTapsAfterWake()
+        #expect(rebuilt.isEmpty)
+        #expect(harness.engine.audioSystemHealth.state == .unresponsive)
+        #expect(harness.engine.taps[app.id] === tap)
+        #expect(tap.invalidateAsyncCallCount == 0)
+        #expect(harness.engine.tapRecoveryCooldownUntil.isEmpty)
+        _ = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: false)
+        #expect(calls.withLock { $0 } == 2)
+    }
+
+    @Test("a wake result cannot recreate a replacement tap installed while the query was running", arguments: [false, true])
+    func wakeQueryDiscardsReplacedTap(displayPass: Bool) async {
+        let started = OSAllocatedUnfairLock(initialState: false)
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let app = makeApp(pid: 71043)
+        let device = makeDevice(id: 743, uid: "display", name: "Display")
+        var factoryCalls = 0
+        let harness = makeHarness(
+            app: app, devices: [device], aliveIDs: [743],
+            wakeRecoveryQuery: { _ in
+                started.withLock { $0 = true }
+                gate.wait()
+                return WakeRecoverySnapshot(liveProcessObjectIDs: [], aliveDeviceIDs: [743], displayDeviceIDs: [743])
+            }
+        ) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        harness.engine.taps[app.id] = LivenessTap(app: app, deviceUIDs: [device.uid])
+        let pass = Task { @MainActor in
+            if displayPass { _ = await harness.engine.rebuildDisplayRoutedTaps(respectCooldown: false) }
+            else { await harness.engine.rebuildActiveTapsAfterWake() }
+        }
+        for _ in 0..<100 where !started.withLock({ $0 }) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(started.withLock { $0 })
+        let replacement = LivenessTap(app: app, deviceUIDs: [device.uid])
+        harness.engine.taps[app.id] = replacement
+        gate.signal()
+        await pass.value
+        #expect(harness.engine.taps[app.id] === replacement)
+        #expect(replacement.invalidateAsyncCallCount == 0)
+        #expect(factoryCalls == 0)
+    }
+
+    @Test("paused wake rebuild reuses the bounded process snapshot instead of reading HAL on main")
+    func pausedWakeReusesProcessSnapshot() async {
+        let app = makeApp(pid: 71044)
+        let paused = makeApp(pid: 71045, objectIDs: [990045])
+        let device = makeDevice(id: 744, uid: "display", name: "Display")
+        var synchronousReads = 0
+        let harness = makeHarness(
+            app: app, devices: [device], aliveIDs: [744],
+            liveProcessObjects: { synchronousReads += 1; return [] },
+            wakeRecoveryQuery: { _ in
+                WakeRecoverySnapshot(liveProcessObjectIDs: [990045], aliveDeviceIDs: [744], displayDeviceIDs: [744])
+            }
+        ) { app, uids, _ in LivenessTap(app: app, deviceUIDs: uids) }
+        let old = LivenessTap(app: paused, deviceUIDs: [device.uid])
+        harness.engine.taps[paused.id] = old
+        await harness.engine.rebuildActiveTapsAfterWake()
+        #expect(synchronousReads == 0)
+        #expect(old.invalidateAsyncCallCount == 1)
+        #expect(harness.engine.taps[paused.id]?.app.processObjectIDs == [990045])
+    }
+
+    @Test("wake rebuilds a running tap when the same aggregate changes nominal sample rate", arguments: [48000.0, 96000.0])
+    func wakeRebuildsChangedRenderClock(sampleRate: Double) async {
+        let app = makeApp(pid: 71046)
+        let device = makeDevice(id: 746, uid: "headphones", name: "Headphones")
+        let aggregateID: AudioDeviceID = 1746
+        let requestedIDs = OSAllocatedUnfairLock(initialState: Set<AudioDeviceID>())
+        var replacement: LivenessTap?
+        let harness = makeHarness(
+            app: app, devices: [device], aliveIDs: [device.id],
+            wakeRecoveryQuery: { ids in
+                requestedIDs.withLock { $0 = Set(ids) }
+                return WakeRecoverySnapshot(liveProcessObjectIDs: [], aliveDeviceIDs: [746],
+                                            displayDeviceIDs: [], nominalSampleRates: [aggregateID: sampleRate])
+            }
+        ) { app, uids, _ in
+            let tap = LivenessTap(app: app, deviceUIDs: uids)
+            replacement = tap
+            return tap
+        }
+        let tap = LivenessTap(app: app, deviceUIDs: [device.uid])
+        tap.recentCallback = true
+        tap.renderClock = TapRenderClock(aggregateDeviceID: aggregateID, sampleRate: 44100)
+        harness.engine.taps[app.id] = tap
+
+        await harness.engine.rebuildActiveTapsAfterWake()
+
+        #expect(requestedIDs.withLock { $0 } == [device.id, aggregateID])
+        #expect(tap.invalidateAsyncCallCount == 1)
+        #expect(replacement?.activateCallCount == 1)
+        #expect(harness.engine.taps[app.id] === replacement)
+    }
+
+    @Test("wake preserves a running tap when its nominal rate is unchanged or unavailable",
+          arguments: [44100.0, 0.0, -1.0, Double.nan, Double.infinity])
+    func wakePreservesUnchangedOrUnreadableClock(sampleRate: Double) async {
+        let app = makeApp(pid: 71047)
+        let device = makeDevice(id: 747, uid: "headphones", name: "Headphones")
+        var factoryCalls = 0
+        let harness = makeHarness(
+            app: app, devices: [device], aliveIDs: [device.id],
+            wakeRecoveryQuery: { _ in
+                WakeRecoverySnapshot(liveProcessObjectIDs: [], aliveDeviceIDs: [747],
+                                     displayDeviceIDs: [], nominalSampleRates: [1747: sampleRate])
+            }
+        ) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        let tap = LivenessTap(app: app, deviceUIDs: [device.uid])
+        tap.recentCallback = true
+        tap.renderClock = TapRenderClock(aggregateDeviceID: 1747, sampleRate: 44100)
+        harness.engine.taps[app.id] = tap
+
+        await harness.engine.rebuildActiveTapsAfterWake()
+
+        #expect(factoryCalls == 0)
+        #expect(tap.invalidateAsyncCallCount == 0)
+        #expect(harness.engine.taps[app.id] === tap)
+    }
+
+    @Test("the selective second wake pass does not rebuild a fresh paused tap again")
+    func secondWakePassRespectsSelectiveCooldown() async {
+        let app = makeApp(pid: 71048)
+        let device = makeDevice(id: 748, uid: "headphones", name: "Headphones")
+        var factoryCalls = 0
+        let harness = makeHarness(app: app, devices: [device], aliveIDs: [device.id]) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        harness.engine.taps[app.id] = LivenessTap(app: app, deviceUIDs: [device.uid])
+
+        await harness.engine.rebuildActiveTapsAfterWake()
+        let freshTap = harness.engine.taps[app.id]
+        await harness.engine.rebuildActiveTapsAfterWake(respectCooldown: true)
+
+        #expect(factoryCalls == 1)
+        #expect(harness.engine.taps[app.id] === freshTap)
+    }
+
+    @Test("manual rebuild gates all creation until teardown completes, and shutdown cancels it", arguments: [false, true])
+    func manualRebuildWaitsForTeardown(stop: Bool) async throws {
+        let app = makeApp(pid: 71049)
+        let device = makeDevice(id: 749, uid: "speaker", name: "Speaker")
+        var factoryCalls = 0
+        let harness = makeHarness(app: app, devices: [device], aliveIDs: [749]) { app, uids, _ in
+            factoryCalls += 1
+            return LivenessTap(app: app, deviceUIDs: uids)
+        }
+        var teardown: CheckedContinuation<Void, Never>?
+        let old = LivenessTap(app: app, deviceUIDs: [device.uid])
+        old.onInvalidateAsync = { await withCheckedContinuation { teardown = $0 } }
+        harness.engine.taps[app.id] = old
+        let rebuild = Task { await harness.engine.rebuildAllTaps() }
+        for _ in 0..<1000 {
+            if teardown != nil { break }
+            await Task.yield()
+        }
+        let continuation = try #require(teardown)
+        // Exercise the same creation entry points used by health and app changes.
+        harness.engine.applyPersistedSettings()
+        harness.engine.ensureTapExists(for: app, deviceUID: device.uid)
+        harness.engine.ensureTapWithDevices(for: app, deviceUIDs: [device.uid])
+        #expect(factoryCalls == 0)
+        #expect(harness.engine.taps.isEmpty)
+        if stop { harness.engine.stop() }
+        continuation.resume()
+        let result = await rebuild.value
+        #expect(factoryCalls == (stop ? 0 : 1))
+        #expect(result == (stop ? nil : 1))
+        #expect(harness.engine.captureRebuildTask == nil)
+        #expect(old.invalidateAsyncCallCount == 1)
+    }
+
     // MARK: - Helpers
 
     private func makeHarness(
@@ -651,6 +903,8 @@ struct AudioEngineLivenessTests {
         aliveIDs: Set<AudioDeviceID>,
         liveProcessObjects: (() -> Set<AudioObjectID>)? = nil,
         displayDeviceIDs: Set<AudioDeviceID> = [],
+        wakeRecoveryQuery: (@Sendable ([AudioDeviceID]) -> WakeRecoverySnapshot?)? = nil,
+        wakeRecoveryTimeout: TimeInterval = 4.0,
         tapFactory: @escaping @MainActor (AudioApp, [String], String?) throws -> any ProcessTapControlling
     ) -> (engine: AudioEngine, deviceMonitor: MockAudioDeviceMonitor) {
         let tempDir = FileManager.default.temporaryDirectory
@@ -667,6 +921,15 @@ struct AudioEngineLivenessTests {
         if let first = devices.first {
             _ = volume.setDefaultDevice(first.id)
         }
+        let query: @Sendable ([AudioDeviceID]) -> WakeRecoverySnapshot?
+        if let wakeRecoveryQuery {
+            query = wakeRecoveryQuery
+        } else {
+            let liveIDs = liveProcessObjects?() ?? []
+            query = { _ in
+                WakeRecoverySnapshot(liveProcessObjectIDs: liveIDs, aliveDeviceIDs: aliveIDs, displayDeviceIDs: displayDeviceIDs)
+            }
+        }
         let engine = AudioEngine(
             permission: permission,
             settingsManager: settings,
@@ -677,6 +940,8 @@ struct AudioEngineLivenessTests {
             isAlive: { aliveIDs.contains($0) },
             liveProcessObjects: liveProcessObjects,
             isDisplayTransport: { displayDeviceIDs.contains($0) },
+            wakeRecoveryQuery: query,
+            wakeRecoveryTimeout: wakeRecoveryTimeout,
             startMonitorsAutomatically: false
         )
         return (engine, deviceMonitor)

@@ -1,3 +1,12 @@
+import AudioToolbox
+
+/// The clock used to configure the current render pipeline. Read on the control
+/// thread; the wake worker receives this value, never a live tap controller.
+nonisolated struct TapRenderClock: Equatable, Sendable {
+    let aggregateDeviceID: AudioDeviceID
+    let sampleRate: Double
+}
+
 /// Abstraction over process tap controllers for testability.
 ///
 /// **Threading:** Intentionally NOT `@MainActor`. Concrete implementations straddle
@@ -14,6 +23,7 @@ protocol ProcessTapControlling: AnyObject {
     var audioLevel: Float { get }
     var currentDeviceUID: String? { get }
     var currentDeviceUIDs: [String] { get }
+    var renderClock: TapRenderClock? { get }
 
     func activate() throws
     func invalidate()
@@ -47,6 +57,8 @@ protocol ProcessTapControlling: AnyObject {
 }
 
 extension ProcessTapControlling {
+    var renderClock: TapRenderClock? { nil }
+
     /// Convenience: defaults sourceDeviceDead to false.
     func switchDevice(to newDeviceUID: String, preferredTapSourceDeviceUID: String?) async throws {
         try await switchDevice(to: newDeviceUID, preferredTapSourceDeviceUID: preferredTapSourceDeviceUID, sourceDeviceDead: false)

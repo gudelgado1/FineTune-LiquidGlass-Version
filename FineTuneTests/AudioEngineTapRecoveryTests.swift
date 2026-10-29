@@ -17,6 +17,31 @@ private final class RecoveryProcessMonitor: AudioProcessMonitoring {
     func stop() {}
 }
 
+@MainActor
+private final class RecoveryGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var entryContinuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            entryContinuation?.resume()
+            entryContinuation = nil
+        }
+    }
+
+    func waitUntilSuspended() async {
+        guard continuation == nil else { return }
+        await withCheckedContinuation { entryContinuation = $0 }
+    }
+
+    func release() {
+        let suspended = continuation
+        continuation = nil
+        suspended?.resume()
+    }
+}
+
 private final class RecoveryTap: ProcessTapControlling {
     let app: AudioApp
     var volume: Float = 1
@@ -31,6 +56,7 @@ private final class RecoveryTap: ProcessTapControlling {
     private(set) var activateCallCount = 0
     private(set) var invalidateCallCount = 0
     private(set) var invalidateAsyncCallCount = 0
+    var invalidationGate: RecoveryGate?
 
     init(app: AudioApp, deviceUIDs: [String]) {
         self.app = app
@@ -47,6 +73,7 @@ private final class RecoveryTap: ProcessTapControlling {
 
     func invalidateAsync() async {
         invalidateAsyncCallCount += 1
+        await invalidationGate?.wait()
     }
 
     func updateEQSettings(_ settings: EQSettings) {}
@@ -114,6 +141,153 @@ struct AudioEngineTapRecoveryTests {
         #expect(engine.appDeviceRouting[app.id] == "device-a")
         let cooldownInterval = engine.tapRecoveryCooldownUntil[app.id]?.timeIntervalSinceNow ?? 0
         #expect(cooldownInterval > 15)
+    }
+
+    @Test("cancelling recovery during teardown does not activate a replacement")
+    func cancelledRecoveryDoesNotRecreate() async {
+        let app = makeApp(pid: 51003)
+        let gate = RecoveryGate()
+        let oldTap = RecoveryTap(app: app, deviceUIDs: ["device-a"])
+        oldTap.invalidationGate = gate
+        var factoryCalls = 0
+        let engine = makeEngine(app: app) { app, uids, _ in
+            factoryCalls += 1
+            return RecoveryTap(app: app, deviceUIDs: uids)
+        }
+        engine.taps[app.id] = oldTap
+        engine.appliedPIDs.insert(app.id)
+
+        let recovery = Task { await engine.recreateTap(for: app.id) }
+        await gate.waitUntilSuspended()
+        recovery.cancel()
+        gate.release()
+        await recovery.value
+
+        #expect(factoryCalls == 0)
+        #expect(engine.taps[app.id] == nil)
+        #expect(!engine.appliedPIDs.contains(app.id))
+        #expect(!engine.pidsBeingRecreated.contains(app.id))
+        #expect(engine.tapRecreationTokens[app.id] == nil)
+    }
+
+    @Test("shutdown during teardown cannot resurrect capture")
+    func shutdownInvalidatesSuspendedRecovery() async {
+        let app = makeApp(pid: 51004)
+        let gate = RecoveryGate()
+        let oldTap = RecoveryTap(app: app, deviceUIDs: ["device-a"])
+        oldTap.invalidationGate = gate
+        var factoryCalls = 0
+        let engine = makeEngine(app: app) { app, uids, _ in
+            factoryCalls += 1
+            return RecoveryTap(app: app, deviceUIDs: uids)
+        }
+        engine.taps[app.id] = oldTap
+
+        let recovery = Task { await engine.recreateTap(for: app.id) }
+        await gate.waitUntilSuspended()
+        engine.shutdown()
+        gate.release()
+        await recovery.value
+
+        #expect(factoryCalls == 0)
+        #expect(engine.taps.isEmpty)
+        #expect(engine.pidsBeingRecreated.isEmpty)
+        #expect(engine.tapRecreationTokens.isEmpty)
+    }
+
+    @Test("old recovery completion preserves a newer recovery's ownership after stop")
+    func oldRecoveryCannotClearNewRecoveryToken() async {
+        let app = makeApp(pid: 51005)
+        let oldGate = RecoveryGate()
+        let newGate = RecoveryGate()
+        let oldTap = RecoveryTap(app: app, deviceUIDs: ["device-a"])
+        oldTap.invalidationGate = oldGate
+        let newTap = RecoveryTap(app: app, deviceUIDs: ["device-b"])
+        newTap.invalidationGate = newGate
+        var factoryCalls = 0
+        let engine = makeEngine(app: app) { app, uids, _ in
+            factoryCalls += 1
+            return RecoveryTap(app: app, deviceUIDs: uids)
+        }
+        engine.taps[app.id] = oldTap
+
+        let oldRecovery = Task { await engine.recreateTap(for: app.id) }
+        await oldGate.waitUntilSuspended()
+        engine.stop()
+        // Model the next engine lifetime installing and recovering a new tap.
+        engine.taps[app.id] = newTap
+        let newRecovery = Task { await engine.recreateTap(for: app.id) }
+        await newGate.waitUntilSuspended()
+        let newToken = engine.tapRecreationTokens[app.id]
+
+        oldGate.release()
+        await oldRecovery.value
+        #expect(factoryCalls == 0)
+        #expect(engine.tapRecreationTokens[app.id] == newToken)
+        #expect(engine.pidsBeingRecreated.contains(app.id))
+
+        newGate.release()
+        await newRecovery.value
+        #expect(factoryCalls == 1)
+        #expect(engine.taps[app.id]?.currentDeviceUIDs == ["device-b"])
+        #expect(!engine.pidsBeingRecreated.contains(app.id))
+        #expect(engine.tapRecreationTokens[app.id] == nil)
+    }
+
+    @Test("default change during teardown is used by the replacement tap")
+    func recoveryUsesDefaultChangedDuringTeardown() async {
+        let app = makeApp(pid: 51006)
+        let gate = RecoveryGate()
+        let oldTap = RecoveryTap(app: app, deviceUIDs: ["device-a"])
+        oldTap.invalidationGate = gate
+        let engine = makeEngine(app: app) { app, uids, sourceUID in
+            let replacement = RecoveryTap(app: app, deviceUIDs: uids)
+            replacement.tapSourceDeviceUID = sourceUID
+            return replacement
+        }
+        let volume = engine.deviceVolumeMonitor as! MockDeviceVolumeProviding
+        volume.defaultDeviceUID = "device-a"
+        engine.followsDefault.insert(app.id)
+        engine.appDeviceRouting[app.id] = "device-a"
+        engine.taps[app.id] = oldTap
+
+        let recovery = Task { await engine.recreateTap(for: app.id) }
+        await gate.waitUntilSuspended()
+        volume.defaultDeviceUID = "device-b"
+        engine.routeFollowsDefaultApps(to: "device-b")
+        gate.release()
+        await recovery.value
+
+        #expect(engine.taps[app.id]?.currentDeviceUIDs == ["device-b"])
+        #expect(engine.appDeviceRouting[app.id] == "device-b")
+    }
+
+    @Test("manual rebuild waits for a tap already removed by an in-flight recovery")
+    func manualRebuildWaitsForExistingRecovery() async {
+        let app = makeApp(pid: 51007)
+        let gate = RecoveryGate()
+        let oldTap = RecoveryTap(app: app, deviceUIDs: ["device-a"])
+        oldTap.invalidationGate = gate
+        var factoryCalls = 0
+        let engine = makeEngine(app: app) { app, uids, _ in
+            factoryCalls += 1
+            return RecoveryTap(app: app, deviceUIDs: uids)
+        }
+        engine.taps[app.id] = oldTap
+        let recovery = Task { await engine.recreateTap(for: app.id) }
+        await gate.waitUntilSuspended()
+        let rebuild = Task { await engine.rebuildAllTaps() }
+        // Longer than the old fixed settle delay: the gate must remain held
+        // because this tap was removed before the manual rebuild took its snapshot.
+        try? await Task.sleep(for: .milliseconds(800))
+        #expect(engine.captureRebuildTask != nil)
+        engine.ensureTapExists(for: app, deviceUID: "device-a")
+        #expect(factoryCalls == 0)
+        gate.release()
+        await recovery.value
+        _ = await rebuild.value
+        #expect(engine.pendingTapTeardowns.isEmpty)
+        #expect(engine.captureRebuildTask == nil)
     }
 
     private func makeEngine(

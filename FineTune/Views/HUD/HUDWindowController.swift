@@ -3,13 +3,62 @@ import AppKit
 import SwiftUI
 import os
 
-/// Borderless panels return `canBecomeKey == false` by default, which would
-/// leave the HUD non-key and its Liquid Glass rendered in the dimmed/frosted
-/// inactive state. Overriding this lets `makeKeyAndOrderFront` make the HUD key
-/// (without activating the app, thanks to `.nonactivatingPanel`) so `glassEffect`
-/// renders vibrant — identical to the key popup.
-private final class KeyableHUDPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+/// A volume notification must never replace the user's key/main window.
+private final class HUDPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Mouse controls still respond on the first click while another app has focus.
+private final class HUDHostingView: NSHostingView<AnyView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var needsPanelToBecomeKey: Bool { false }
+}
+
+/// Reveal the close control near the top-left corner, like a notification.
+/// The hover region stays in place while the button fades in and out.
+private struct DismissibleHUD<Content: View>: View {
+    let content: Content
+    let onDismiss: () -> Void
+    let onHover: (Bool) -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isCloseHovered = false
+
+    var body: some View {
+        content
+            .padding(8)
+            .overlay(alignment: .topLeading) {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 20, height: 20)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(.primary.opacity(0.2), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss volume notification")
+                .accessibilityLabel("Dismiss volume notification")
+                .accessibilityIdentifier("hud.dismiss")
+                .opacity(isCloseHovered ? 1 : 0)
+                .allowsHitTesting(isCloseHovered)
+                .accessibilityHidden(!isCloseHovered)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.12), value: isCloseHovered)
+                // Track a generous corner region even while the button is hidden.
+                // Fading this wrapper would also make the hover target disappear.
+                .frame(width: 36, height: 36, alignment: .topLeading)
+                .contentShape(Rectangle())
+                .onHover { isCloseHovered = $0 }
+            }
+            .onHover { hovering in
+                if !hovering { isCloseHovered = false }
+                onHover(hovering)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityAction(named: Text("Dismiss volume notification")) {
+                onDismiss()
+            }
+    }
 }
 
 /// Owns the on-screen volume HUD panel and its auto-hide timing.
@@ -20,9 +69,12 @@ final class HUDWindowController {
     private let popupVisibility: PopupVisibilityService
     private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "HUDWindowController")
 
-    private var panel: NSPanel?
+    private(set) var panel: NSPanel?
     private var hostingView: NSHostingView<AnyView>?
     private var hideTask: Task<Void, Never>?
+    private var localDismissMonitor: Any?
+    private var globalDismissMonitor: Any?
+    private var isHovering = false
     private var styleAtLastShow: HUDStyle = .tahoe
     /// Invalidates in-flight fade-out completions. A `show()` that arrives during
     /// the ~110 ms fade-out bumps this; the stale fade's completion handler then
@@ -39,6 +91,8 @@ final class HUDWindowController {
     private var settingsChangedObserver: NSObjectProtocol?
 
     var hideDelayOverride: Duration?
+    var observesOutsideClicks = true
+    var fullscreenProvider: () -> Bool = HUDWindowController.foregroundAppIsFullscreen
     var frameProvider: () -> NSRect? = { NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame }
     private(set) var showCallCount: Int = 0
     private(set) var showDidUpdatePanel: Bool = false
@@ -58,6 +112,8 @@ final class HUDWindowController {
         if let observer = settingsChangedObserver {
             DistributedNotificationCenter.default().removeObserver(observer)
         }
+        let monitors = [localDismissMonitor, globalDismissMonitor].compactMap { $0 }
+        DispatchQueue.main.async { monitors.forEach(NSEvent.removeMonitor) }
         // `deinit` is nonisolated; `shutdown()` is preferred for synchronous teardown.
         if let panel {
             DispatchQueue.main.async { panel.orderOut(nil) }
@@ -66,11 +122,17 @@ final class HUDWindowController {
 
     /// Synchronous teardown for `willTerminate` — hides without animation.
     func shutdown() {
+        dismiss()
+    }
+
+    /// Explicit dismissal is immediate so the next click can reach other windows.
+    func dismiss() {
         hideTask?.cancel()
         hideTask = nil
-        if let panel, panel.isVisible {
-            panel.orderOut(nil)
-        }
+        hideAnimationGeneration += 1
+        isHovering = false
+        removeDismissMonitors()
+        panel?.orderOut(nil)
     }
 
     // MARK: - Style-indexed hide delay
@@ -87,7 +149,7 @@ final class HUDWindowController {
         showCallCount += 1
         showDidUpdatePanel = false
 
-        guard !isForegroundAppFullscreen() else {
+        guard !fullscreenProvider() else {
             logger.debug("Skipping HUD show: foreground app is fullscreen")
             return
         }
@@ -98,6 +160,7 @@ final class HUDWindowController {
 
         let style = settingsManager.appSettings.hudStyle
         let appearance = settingsManager.appSettings.appearance
+        if styleAtLastShow != style || panel?.isVisible != true { isHovering = false }
         styleAtLastShow = style
         let panel = ensurePanel()
         // Follow the app theme (matches the popup), refreshed each show. System
@@ -115,20 +178,22 @@ final class HUDWindowController {
         switch style {
         case .tahoe:
             root = AnyView(
-                TahoeStyleHUD(
-                    sliderFraction: displayFraction,
-                    mute: mute,
-                    deviceName: deviceName,
-                    onSliderChange: { [weak self] newFraction in
-                        self?.volumeWriter?(Double(newFraction))
-                    },
-                    onHoverChange: { [weak self] hovering in
-                        self?.handleHoverChange(hovering)
-                    }
+                DismissibleHUD(
+                    content: TahoeStyleHUD(
+                        sliderFraction: displayFraction,
+                        mute: mute,
+                        deviceName: deviceName,
+                        onSliderChange: { [weak self] newFraction in
+                            self?.volumeWriter?(Double(newFraction))
+                        }
+                    ),
+                    onDismiss: { [weak self] in self?.dismiss() },
+                    onHover: { [weak self] in self?.handleHoverChange($0) }
                 )
+                .environment(\.controlActiveState, .active)
                 .preferredColorScheme(scheme)
             )
-            size = NSSize(width: 300, height: 72)
+            size = NSSize(width: 316, height: 88)
         case .classic:
             root = AnyView(
                 ClassicStyleHUD(sliderFraction: displayFraction, mute: mute)
@@ -140,7 +205,7 @@ final class HUDWindowController {
         if let existing = hostingView {
             existing.rootView = root
         } else {
-            let hv = NSHostingView(rootView: root)
+            let hv = HUDHostingView(rootView: root)
             hv.frame = NSRect(origin: .zero, size: size)
             // Clear the hosting view's backing so the panel is truly transparent.
             // Without this, NSHostingView's opaque default backing sits behind the
@@ -160,13 +225,11 @@ final class HUDWindowController {
             // Possibly mid fade-out: neutralize it or the panel gets ordered out
             // (and left at alpha ~0) right after this show.
             cancelHideAnimation(for: panel)
-            panel.makeKeyAndOrderFront(nil)
+            panel.orderFrontRegardless()
         } else {
             panel.alphaValue = 0
-            // Key (not just ordered front) so Liquid Glass renders vibrant like the
-            // popup. `.nonactivatingPanel` keeps the user's app frontmost; only the
-            // key-window status moves here for the HUD's brief lifetime.
-            panel.makeKeyAndOrderFront(nil)
+            // Present without moving keyboard focus away from the user's app.
+            panel.orderFrontRegardless()
             let duration = reduceMotionEnabled() ? 0.08 : 0.12
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = duration
@@ -179,6 +242,7 @@ final class HUDWindowController {
         // `.clear` glass shows the desktop instead of a black layer.
         clearPanelBacking(panel)
 
+        startDismissMonitors()
         scheduleHide(for: style)
         postAccessibilityAnnouncement(panel: panel, sliderFraction: sliderFraction, mute: mute, deviceName: deviceName)
     }
@@ -220,22 +284,28 @@ final class HUDWindowController {
             return
         }
 
+        if styleAtLastShow != .tahoe || panel?.isVisible != true { isHovering = false }
         styleAtLastShow = .tahoe
         let panel = ensurePanel()
         panel.appearance = settingsManager.appSettings.appearance.nsAppearance ?? NSApp.effectiveAppearance
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
 
         let scheme = settingsManager.appSettings.appearance.swiftUIColorScheme
         let root = AnyView(
-            PerAppHUD(icon: icon, title: title, content: content)
-                .preferredColorScheme(scheme)
+            DismissibleHUD(
+                content: PerAppHUD(icon: icon, title: title, content: content),
+                onDismiss: { [weak self] in self?.dismiss() },
+                onHover: { [weak self] in self?.handleHoverChange($0) }
+            )
+            .environment(\.controlActiveState, .active)
+            .preferredColorScheme(scheme)
         )
-        let size = NSSize(width: 300, height: 72)
+        let size = NSSize(width: 316, height: 88)
 
         if let existing = hostingView {
             existing.rootView = root
         } else {
-            let hv = NSHostingView(rootView: root)
+            let hv = HUDHostingView(rootView: root)
             hv.frame = NSRect(origin: .zero, size: size)
             // Clear the hosting view's backing so the panel is truly transparent.
             // Without this, NSHostingView's opaque default backing sits behind the
@@ -255,13 +325,11 @@ final class HUDWindowController {
             // Possibly mid fade-out: neutralize it or the panel gets ordered out
             // (and left at alpha ~0) right after this show.
             cancelHideAnimation(for: panel)
-            panel.makeKeyAndOrderFront(nil)
+            panel.orderFrontRegardless()
         } else {
             panel.alphaValue = 0
-            // Key (not just ordered front) so Liquid Glass renders vibrant like the
-            // popup. `.nonactivatingPanel` keeps the user's app frontmost; only the
-            // key-window status moves here for the HUD's brief lifetime.
-            panel.makeKeyAndOrderFront(nil)
+            // Present without moving keyboard focus away from the user's app.
+            panel.orderFrontRegardless()
             let duration = reduceMotionEnabled() ? 0.08 : 0.12
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = duration
@@ -274,6 +342,7 @@ final class HUDWindowController {
         // `.clear` glass shows the desktop instead of a black layer.
         clearPanelBacking(panel)
 
+        startDismissMonitors()
         scheduleHide(for: .tahoe)
         postPerAppAccessibilityAnnouncement(panel: panel, title: title, content: content)
     }
@@ -286,6 +355,8 @@ final class HUDWindowController {
     func hide() {
         hideTask?.cancel()
         hideTask = nil
+        removeDismissMonitors()
+        isHovering = false
         guard let panel, panel.isVisible else { return }
         let generation = hideAnimationGeneration
         let duration = reduceMotionEnabled() ? 0.08 : 0.11
@@ -361,15 +432,14 @@ final class HUDWindowController {
     private func ensurePanel() -> NSPanel {
         if let existing = panel { return existing }
 
-        // KeyableHUDPanel so `makeKeyAndOrderFront` can make the HUD key → its
-        // Liquid Glass renders vibrant, identical to the popup.
-        let p = KeyableHUDPanel(
+        let p = HUDPanel(
             contentRect: NSRect(x: 0, y: 0, width: 300, height: 72),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         p.level = .floating
+        p.becomesKeyOnlyIfNeeded = true
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .transient]
         p.hasShadow = false
         p.isOpaque = false
@@ -398,7 +468,7 @@ final class HUDWindowController {
     /// finishes ordering in. Mirrors the popup window's chrome clearing.
     private func clearPanelBacking(_ panel: NSPanel) {
         // Belt-and-suspenders: keep the window's own drop shadow off (it can be
-        // re-enabled when the borderless panel becomes key), so no shadow renders
+        // re-enabled when the panel is ordered in), so no shadow renders
         // around the HUD on light backdrops.
         panel.hasShadow = false
         panel.invalidateShadow()
@@ -422,6 +492,7 @@ final class HUDWindowController {
 
     private func scheduleHide(for style: HUDStyle) {
         hideTask?.cancel()
+        guard !isHovering else { hideTask = nil; return }
         let delay = hideDelay(for: style)
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
@@ -430,13 +501,40 @@ final class HUDWindowController {
         }
     }
 
-    private func handleHoverChange(_ hovering: Bool) {
+    func handleHoverChange(_ hovering: Bool) {
+        isHovering = hovering
         if hovering {
             hideTask?.cancel()
             hideTask = nil
         } else {
             scheduleHide(for: styleAtLastShow)
         }
+    }
+
+    // Observe outside clicks; never consume or resend the user's mouse event.
+    private func startDismissMonitors() {
+        guard observesOutsideClicks, localDismissMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        localDismissMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            MainActor.assumeIsolated { _ = self?.handleOutsideMouseDown(event) }
+            return event
+        }
+        globalDismissMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismiss() }
+        }
+    }
+
+    @discardableResult
+    func handleOutsideMouseDown(_ event: NSEvent) -> NSEvent {
+        if let panel, panel.isVisible, event.window !== panel { dismiss() }
+        return event
+    }
+
+    private func removeDismissMonitors() {
+        if let monitor = localDismissMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = globalDismissMonitor { NSEvent.removeMonitor(monitor) }
+        localDismissMonitor = nil
+        globalDismissMonitor = nil
     }
 
     // MARK: - Accessibility
@@ -486,7 +584,7 @@ final class HUDWindowController {
 
     // MARK: - Fullscreen guard
 
-    private func isForegroundAppFullscreen() -> Bool {
+    private static func foregroundAppIsFullscreen() -> Bool {
         guard let frontmostApp = NSWorkspace.shared.frontmostApplication else { return false }
         let pid = frontmostApp.processIdentifier
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]

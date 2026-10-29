@@ -33,6 +33,62 @@ nonisolated struct ProcessEnumeration: Sendable {
     }
 }
 
+/// Owns one HAL listener across asynchronous registration and teardown. A stop
+/// can arrive before AddPropertyListener returns, including after its deadline;
+/// in that case the worker that eventually finishes also removes the listener.
+nonisolated final class AudioProcessListenerRegistration: Sendable {
+    private struct State: Sendable {
+        var started = false
+        var cancelled = false
+        var registered = false
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let add: @Sendable () -> OSStatus
+    private let remove: @Sendable () -> OSStatus
+
+    init(add: @escaping @Sendable () -> OSStatus, remove: @escaping @Sendable () -> OSStatus) {
+        self.add = add
+        self.remove = remove
+    }
+
+    /// Runs on the HAL worker, never the main actor.
+    func install() -> OSStatus {
+        let shouldInstall = state.withLock { state in
+            guard !state.cancelled, !state.started else { return false }
+            state.started = true
+            return true
+        }
+        guard shouldInstall else { return noErr }
+
+        let status = add()
+        if status == noErr {
+            let needsRemoval = state.withLock { state in
+                if state.cancelled { return true }
+                state.registered = true
+                return false
+            }
+            if needsRemoval { _ = remove() }
+        }
+        return status
+    }
+
+    func cancel() {
+        let needsRemoval = state.withLock { state in
+            state.cancelled = true
+            guard state.registered else { return false }
+            state.registered = false
+            return true
+        }
+        if needsRemoval {
+            let remove = self.remove
+            Task {
+                _ = await HALExecutor.run(timeout: 4.0, remove)
+            }
+        }
+    }
+}
+
 /// Lightweight value for detecting process list changes without comparing icons.
 /// Name/bundleID are included so a late-resolving app identity (e.g. the
 /// NSRunningApplication entry appearing a refresh after the HAL object) still
@@ -112,9 +168,13 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     }
 
     // Property listeners
-    private var processListListenerBlock: AudioObjectPropertyListenerBlock?
-    private var processListenerBlocks: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
-    private var monitoredProcesses: Set<AudioObjectID> = []
+    private var processListRegistration: AudioProcessListenerRegistration?
+    private var processRegistrations: [AudioObjectID: AudioProcessListenerRegistration] = [:]
+    private var isRunning = false
+    // Explicit one-shot refreshes are allowed before start(), but stop() closes
+    // the current lifetime until start() opens a new one.
+    private var isStopped = false
+    private var lifecycleID = UUID()
     private var periodicRefreshTask: Task<Void, Never>?
     private var trailingRefreshTask: Task<Void, Never>?
     private var lastRefreshTime: Date = .distantPast
@@ -138,7 +198,7 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     /// legitimately be slow under heavy load.
     private let enumerationTimeout: TimeInterval = 6.0
 
-    /// Whether to register per-process HAL listeners. Tests inject synthetic
+    /// Whether to register HAL listeners. Tests inject synthetic
     /// process objects, so registering real listeners for them would be pointless
     /// IPC against IDs the HAL never issued.
     var managesHALListeners = true
@@ -151,12 +211,6 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
             AudioProcessMonitor.enumerateAudioProcesses(excluding: pid)
         }
     }
-
-    private var processListAddress = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyProcessObjectList,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
 
     /// Function type for the private responsibility API
     private typealias ResponsibilityFunc = @convention(c) (pid_t) -> pid_t
@@ -213,68 +267,61 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     }
 
     func start() {
-        guard processListListenerBlock == nil else { return }
+        guard !isRunning else { return }
 
         logger.debug("Starting audio process monitor")
+        isRunning = true
+        isStopped = false
 
-        // Set up listener first
-        processListListenerBlock = { [weak self] numberAddresses, addresses in
+        if managesHALListeners {
+            let generation = lifecycleID
+            let registration = makeRegistration(
+                objectID: .system,
+                selector: kAudioHardwarePropertyProcessObjectList,
+                generation: generation
+            )
+            processListRegistration = registration
             Task { @MainActor [weak self] in
-                self?.scheduleCoalescedRefresh()
+                let status = await HALExecutor.run(timeout: 4.0) { registration.install() }
+                guard let self, self.lifecycleID == generation,
+                      self.processListRegistration === registration else {
+                    registration.cancel()
+                    return
+                }
+                if status != noErr {
+                    registration.cancel()
+                    self.processListRegistration = nil
+                    self.logger.error("Failed to add process list listener: \(status.map(String.init) ?? "timeout")")
+                }
             }
         }
 
-        // Off-main: at launch the daemon may already be wedged, and a blocking
-        // registration here would freeze the app before it ever draws.
-        let block = processListListenerBlock!
-        Task { @MainActor [weak self] in
-            let status = await HALExecutor.run(timeout: 4.0) {
-                var address = AudioObjectPropertyAddress(
-                    mSelector: kAudioHardwarePropertyProcessObjectList,
-                    mScope: kAudioObjectPropertyScopeGlobal,
-                    mElement: kAudioObjectPropertyElementMain
-                )
-                return AudioObjectAddPropertyListenerBlock(.system, &address, .main, block)
-            }
-            if status != noErr {
-                self?.logger.error("Failed to add process list listener: \(status.map(String.init) ?? "timeout")")
-            }
-        }
-
-        // Initial refresh
         refresh()
-
-        // Periodic refresh as safety net — CoreAudio property listeners can miss
-        // notifications during rapid process lifecycle changes (quit + relaunch).
+        // HAL notifications can be missed during rapid process lifecycle changes.
         startPeriodicRefresh()
     }
 
     func stop() {
         logger.debug("Stopping audio process monitor")
 
+        // Invalidate before teardown: old enumerations, callbacks, and listener
+        // registrations must never publish into a subsequent start(). Clearing
+        // these flags lets the new lifetime enumerate without waiting for old IPC.
+        lifecycleID = UUID()
+        isRunning = false
+        isStopped = true
+        refreshInFlight = false
+        refreshRequestedWhileInFlight = false
+        lastRefreshTime = .distantPast
         periodicRefreshTask?.cancel()
         periodicRefreshTask = nil
         trailingRefreshTask?.cancel()
         trailingRefreshTask = nil
 
-        // Remove process list listener off-main (fire and forget): teardown runs
-        // on paths like the Core Audio resync, where the daemon may still be slow.
-        if let block = processListListenerBlock {
-            processListListenerBlock = nil
-            Task {
-                _ = await HALExecutor.run(timeout: 4.0) {
-                    var address = AudioObjectPropertyAddress(
-                        mSelector: kAudioHardwarePropertyProcessObjectList,
-                        mScope: kAudioObjectPropertyScopeGlobal,
-                        mElement: kAudioObjectPropertyElementMain
-                    )
-                    return AudioObjectRemovePropertyListenerBlock(.system, &address, .main, block)
-                }
-            }
-        }
-
-        // Remove all per-process listeners
-        removeAllProcessListeners()
+        processListRegistration?.cancel()
+        processListRegistration = nil
+        for registration in processRegistrations.values { registration.cancel() }
+        processRegistrations.removeAll()
     }
 
     /// Coalesces bursts of HAL process notifications. The first event refreshes
@@ -283,6 +330,7 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     /// instead of a storm of full process-list scans (NSWorkspace + per-process
     /// HAL reads + sysctl walks, all on the main thread).
     private func scheduleCoalescedRefresh() {
+        guard !isStopped else { return }
         let now = Date()
         if now.timeIntervalSince(lastRefreshTime) >= 0.1 {
             lastRefreshTime = now
@@ -323,6 +371,7 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     /// froze the whole app on 2026-07-29 when `coreaudiod` wedged and its IPC
     /// never returned (main thread blocked in `mach_msg2_trap`, 100% of samples).
     private func refresh() {
+        guard !isStopped else { return }
         // Coalesce rather than drop: the caller's event (an app starting or
         // stopping audio) must still be reflected once the running pass ends.
         if refreshInFlight {
@@ -333,10 +382,14 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
         refreshInFlight = true
 
         let myPID = ProcessInfo.processInfo.processIdentifier
+        let generation = lifecycleID
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.lifecycleID == generation, !self.isStopped else { return }
             let timeout = self.enumerationTimeout
             let enumeration = await self.enumerate(myPID, timeout)
+            // A completion from before stop() must not publish, report health,
+            // or clear the in-flight/coalescing state of a replacement refresh.
+            guard self.lifecycleID == generation, !self.isStopped else { return }
             self.refreshInFlight = false
 
             guard let enumeration else {
@@ -353,7 +406,7 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
                 self.publish(enumeration)
             }
             // Serve whatever arrived while this pass was running.
-            if self.refreshRequestedWhileInFlight {
+            if self.lifecycleID == generation, !self.isStopped, self.refreshRequestedWhileInFlight {
                 self.refreshRequestedWhileInFlight = false
                 self.refresh()
             }
@@ -471,76 +524,76 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
     /// IPC too, and a wedged daemon must not be able to freeze the UI through
     /// listener churn.
     private func updateProcessListeners(for processIDs: [AudioObjectID]) {
-        guard managesHALListeners else { return }
+        guard managesHALListeners, !isStopped else { return }
         let currentSet = Set(processIDs)
+        let monitoredProcesses = Set(processRegistrations.keys)
 
-        let removed = monitoredProcesses.subtracting(currentSet)
-        for objectID in removed {
-            removeProcessListener(for: objectID)
+        for objectID in monitoredProcesses.subtracting(currentSet) {
+            processRegistrations.removeValue(forKey: objectID)?.cancel()
         }
-
-        let added = currentSet.subtracting(monitoredProcesses)
-        for objectID in added {
+        for objectID in currentSet.subtracting(monitoredProcesses) {
             addProcessListener(for: objectID)
         }
-
-        monitoredProcesses = currentSet
     }
 
     private func addProcessListener(for objectID: AudioObjectID) {
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            Task { @MainActor [weak self] in
-                self?.scheduleCoalescedRefresh()
-            }
-        }
-
-        // Record optimistically, then register off-main; drop the record if the
-        // HAL rejects it. Keeping the registration on the main thread would put
-        // one blocking IPC per new audio process back on the UI path.
-        processListenerBlocks[objectID] = block
+        let generation = lifecycleID
+        let registration = makeRegistration(
+            objectID: objectID,
+            selector: kAudioProcessPropertyIsRunning,
+            generation: generation
+        )
+        processRegistrations[objectID] = registration
         Task { @MainActor [weak self] in
-            let status = await HALExecutor.run(timeout: 4.0) {
-                var address = AudioObjectPropertyAddress(
-                    mSelector: kAudioProcessPropertyIsRunning,
-                    mScope: kAudioObjectPropertyScopeGlobal,
-                    mElement: kAudioObjectPropertyElementMain
-                )
-                return AudioObjectAddPropertyListenerBlock(objectID, &address, .main, block)
+            let status = await HALExecutor.run(timeout: 4.0) { registration.install() }
+            guard let self, self.lifecycleID == generation,
+                  self.processRegistrations[objectID] === registration else {
+                registration.cancel()
+                return
             }
-            guard let self else { return }
             if status != noErr {
-                self.processListenerBlocks.removeValue(forKey: objectID)
-                self.monitoredProcesses.remove(objectID)
+                // A timed-out add can still finish later. Cancelling its token
+                // makes that worker remove the late registration itself.
+                registration.cancel()
+                self.processRegistrations.removeValue(forKey: objectID)
                 self.logger.warning("Failed to add isRunning listener for \(objectID): \(status.map(String.init) ?? "timeout")")
             }
         }
     }
 
-    private func removeProcessListener(for objectID: AudioObjectID) {
-        guard let block = processListenerBlocks.removeValue(forKey: objectID) else { return }
-
-        Task { @MainActor [weak self] in
-            let status = await HALExecutor.run(timeout: 4.0) {
+    private func makeRegistration(
+        objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        generation: UUID
+    ) -> AudioProcessListenerRegistration {
+        let logger = self.logger
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.lifecycleID == generation, !self.isStopped else { return }
+                self.scheduleCoalescedRefresh()
+            }
+        }
+        return AudioProcessListenerRegistration(
+            add: {
                 var address = AudioObjectPropertyAddress(
-                    mSelector: kAudioProcessPropertyIsRunning,
+                    mSelector: selector,
                     mScope: kAudioObjectPropertyScopeGlobal,
                     mElement: kAudioObjectPropertyElementMain
                 )
-                return AudioObjectRemovePropertyListenerBlock(objectID, &address, .main, block)
+                return AudioObjectAddPropertyListenerBlock(objectID, &address, .main, block)
+            },
+            remove: {
+                var address = AudioObjectPropertyAddress(
+                    mSelector: selector,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                let status = AudioObjectRemovePropertyListenerBlock(objectID, &address, .main, block)
+                if status != noErr, status != OSStatus(kAudioHardwareBadObjectError) {
+                    logger.warning("Failed to remove process listener for \(objectID): \(status)")
+                }
+                return status
             }
-            // Tolerate kAudioHardwareBadObjectError (-66680): process object already destroyed
-            if let status, status != noErr, status != OSStatus(kAudioHardwareBadObjectError) {
-                self?.logger.warning("Failed to remove isRunning listener for \(objectID): \(status)")
-            }
-        }
+        )
     }
-
-    private func removeAllProcessListeners() {
-        for objectID in monitoredProcesses {
-            removeProcessListener(for: objectID)
-        }
-        monitoredProcesses.removeAll()
-        processListenerBlocks.removeAll()
-    }
-
 }

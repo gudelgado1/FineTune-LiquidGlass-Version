@@ -82,6 +82,7 @@ struct TahoeStyleHUD: View {
                 // (matching the system volume HUD) and near-black in Light, where a
                 // hardcoded white fill vanished against the light glass.
                 Slider(value: sliderBinding, in: 0...1)
+                    .accessibilityLabel("Volume")
                     .controlSize(.regular)
                     .tint(.primary)
                     .opacity(displayMute ? 0.55 : 1.0)
@@ -97,8 +98,7 @@ struct TahoeStyleHUD: View {
         .padding(.top, 14)
         .padding(.bottom, 13)
         .frame(width: Self.frameWidth, height: Self.frameHeight)
-        // Liquid Glass, vibrant now that the HUD panel is a key window — identical
-        // to the popup, which is also `.glassEffect(.clear)` in a key window.
+        // Appearance is independent of keyboard focus; the HUD stays non-key.
         .glassPanel(cornerRadius: Self.cornerRadius)
         // Crisp hairline edge to match the popup.
         .overlay {
@@ -120,7 +120,7 @@ struct TahoeStyleHUD: View {
         .onChange(of: mute) { _, _ in
             dragValue = nil
         }
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityDescription)
     }
 }

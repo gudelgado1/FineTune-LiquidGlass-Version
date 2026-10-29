@@ -33,6 +33,8 @@ struct AppRow: View {
     let isEQExpanded: Bool
     let onEQToggle: () -> Void
     let isFocused: Bool
+    /// Popup-owned keyboard percentage entry, forwarded to the shared controls.
+    let textEntry: PopupTextEntryCoordinator?
     /// Whether this app is the current media-transport shortcut target.
     let isMediaTarget: Bool
     /// Toggles this app as the media-transport shortcut target.
@@ -72,6 +74,7 @@ struct AppRow: View {
         isEQExpanded: Bool = false,
         onEQToggle: @escaping () -> Void = {},
         isFocused: Bool = false,
+        textEntry: PopupTextEntryCoordinator? = nil,
         isMediaTarget: Bool = false,
         onToggleMediaTarget: @escaping () -> Void = {}
     ) {
@@ -104,6 +107,7 @@ struct AppRow: View {
         self.isEQExpanded = isEQExpanded
         self.onEQToggle = onEQToggle
         self.isFocused = isFocused
+        self.textEntry = textEntry
         self.isMediaTarget = isMediaTarget
         self.onToggleMediaTarget = onToggleMediaTarget
         // Initialize local EQ state for reactive UI updates
@@ -203,6 +207,8 @@ struct AppRow: View {
                     boost: boost,
                     isEQExpanded: isEQExpanded,
                     isParentHovered: isRowHovered,
+                    isRowFocused: isFocused,
+                    textEntry: textEntry,
                     onVolumeChange: onVolumeChange,
                     onMuteChange: onMuteChange,
                     onBoostChange: onBoostChange,

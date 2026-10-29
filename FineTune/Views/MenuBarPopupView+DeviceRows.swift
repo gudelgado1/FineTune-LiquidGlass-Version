@@ -56,6 +56,7 @@ extension MenuBarPopupView {
                 ForEach(sortedInputDevices) { device in
                     InputDeviceRow(
                         device: device,
+                        iconOverride: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid),
                         isDefault: device.id == deviceVolumeMonitor.defaultInputDeviceID,
                         volume: deviceVolumeMonitor.inputVolumes[device.id] ?? 1.0,
                         isMuted: deviceVolumeMonitor.inputMuteStates[device.id] ?? false,
@@ -69,7 +70,8 @@ extension MenuBarPopupView {
                             let currentMute = deviceVolumeMonitor.inputMuteStates[device.id] ?? false
                             deviceVolumeMonitor.setInputMute(for: device.id, to: !currentMute)
                         },
-                        isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid)
+                        isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid),
+                        textEntry: textEntry
                     )
                     .id(PopupKeyboardNavModel.RowID.device(uid: device.uid))
                 }

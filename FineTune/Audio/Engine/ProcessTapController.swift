@@ -72,6 +72,18 @@ final class ProcessTapController: ProcessTapControlling {
     private nonisolated(unsafe) var _secondaryPreferredStereoRightChannel: Int = 1
     /// Monotonic host tick of the last audio callback execution.
     private nonisolated(unsafe) var _lastRenderHostTime: UInt64 = 0
+    private nonisolated(unsafe) var renderLongGaps: Int64 = 0
+    private nonisolated(unsafe) var renderCallbackCount: Int64 = 0
+    private nonisolated(unsafe) var primaryRenderSampleRate: Double = 48000
+
+    // OSAtomic supports the app's macOS 14 deployment target. Atomic counters
+    // keep control-thread reads independent of the render-thread timing state.
+    var renderDiagnostics: TapRenderDiagnostics {
+        TapRenderDiagnostics(
+            callbackCount: UInt64(bitPattern: OSAtomicAdd64Barrier(0, &renderCallbackCount)),
+            longGapCount: UInt64(bitPattern: OSAtomicAdd64Barrier(0, &renderLongGaps))
+        )
+    }
     /// Monotonic host tick of successful activation.
     private nonisolated(unsafe) var _activationHostTime: UInt64 = 0
     /// Set once any audio callback has rendered at least one buffer.
@@ -161,8 +173,13 @@ final class ProcessTapController: ProcessTapControlling {
     private var primaryResources = TapResources()
     private var activated = false
 
+    /// Clock used to initialize the active DSP. The wake worker compares this
+    /// snapshot with HAL without reading this controller from a background queue.
+    private(set) var renderClock: TapRenderClock?
+
     // Secondary tap for crossfade
     private var secondaryResources = TapResources()
+    private var secondaryRenderClock: TapRenderClock?
 
     /// Guard against re-entrant crossfade (ORCH-001)
     private var isSwitching = false
@@ -226,6 +243,20 @@ final class ProcessTapController: ProcessTapControlling {
     /// Toggles the per-callback DSP bypass (RT-safe atomic Bool write).
     func setDSPBypass(_ bypass: Bool) {
         _dspBypass = bypass
+    }
+
+    /// Reserves the identity captured by a primary IO proc before it starts.
+    /// Internal so callback tests can exercise generations without opening HAL resources.
+    func reservePrimaryCallbackID() -> UInt32 {
+        nextCallbackID += 1
+        _primaryCallbackID = nextCallbackID
+        return nextCallbackID
+    }
+
+    private func recordRenderClock(aggregateDeviceID: AudioDeviceID, sampleRate: Double) {
+        primaryRenderSampleRate = sampleRate
+        renderClock = TapRenderClock(aggregateDeviceID: aggregateDeviceID, sampleRate: sampleRate)
+        DiagnosticLog.log("render-clock: pid=\(app.id) aggregate=\(aggregateDeviceID) sampleRate=\(sampleRate)")
     }
 
     var currentDeviceVolume: Float {
@@ -655,9 +686,8 @@ final class ProcessTapController: ProcessTapControlling {
         loudnessCompensator = LoudnessCompensator(sampleRate: sampleRate)
 
         // Create IO proc with gain processing
-        nextCallbackID += 1
-        _primaryCallbackID = nextCallbackID
-        let activateCallbackID = nextCallbackID
+        let activateCallbackID = reservePrimaryCallbackID()
+        let activateTiming = RenderTimingState()
         err = AudioDeviceCreateIOProcIDWithBlock(&primaryResources.deviceProcID, primaryResources.aggregateDeviceID, queue) { [weak self] _, inInputData, _, outOutputData, _ in
             guard let self else {
                 // Zero output to prevent garbage audio if controller is deallocated
@@ -667,7 +697,7 @@ final class ProcessTapController: ProcessTapControlling {
                 }
                 return
             }
-            self.processAudioCallback(inInputData, to: outOutputData, callbackID: activateCallbackID)
+            self.processAudioCallback(inInputData, to: outOutputData, callbackID: activateCallbackID, timing: activateTiming)
         }
         guard err == noErr else {
             cleanupPartialActivation()
@@ -697,6 +727,7 @@ final class ProcessTapController: ProcessTapControlling {
         currentDeviceUIDs = targetDeviceUIDs
 
         activated = true
+        recordRenderClock(aggregateDeviceID: primaryResources.aggregateDeviceID, sampleRate: sampleRate)
         logger.info("Tap activated for \(self.app.name) on \(self.targetDeviceUIDs.count) device(s)")
     }
 
@@ -843,6 +874,8 @@ final class ProcessTapController: ProcessTapControlling {
         _lastRenderHostTime = 0
         _activationHostTime = 0
         _hasRenderedAudio = false
+        renderClock = nil
+        secondaryRenderClock = nil
 
         crossfadeTask?.cancel()
         crossfadeTask = nil
@@ -1002,6 +1035,7 @@ final class ProcessTapController: ProcessTapControlling {
         crossfadeState.totalSamples = CrossfadeConfig.totalSamples(at: sampleRate, for: profile)
 
         secondaryRampCoefficient = Self.rampCoefficient(forSampleRate: sampleRate)
+        secondaryRenderClock = TapRenderClock(aggregateDeviceID: aggID, sampleRate: sampleRate)
 
         _secondaryCurrentVolume = _primaryCurrentVolume
 
@@ -1031,6 +1065,7 @@ final class ProcessTapController: ProcessTapControlling {
         nextCallbackID += 1
         _secondaryCallbackID = nextCallbackID
         let secondaryCallbackID = nextCallbackID
+        let secondaryTiming = RenderTimingState()
         err = AudioDeviceCreateIOProcIDWithBlock(&secondaryResources.deviceProcID, secondaryResources.aggregateDeviceID, queue) { [weak self] _, inInputData, _, outOutputData, _ in
             guard let self else {
                 // Zero output to prevent garbage audio if controller is deallocated
@@ -1040,7 +1075,7 @@ final class ProcessTapController: ProcessTapControlling {
                 }
                 return
             }
-            self.processAudioCallback(inInputData, to: outOutputData, callbackID: secondaryCallbackID)
+            self.processAudioCallback(inInputData, to: outOutputData, callbackID: secondaryCallbackID, timing: secondaryTiming)
         }
         guard err == noErr else {
             secondaryResources.destroy()
@@ -1071,18 +1106,23 @@ final class ProcessTapController: ProcessTapControlling {
         secondaryAutoEQProcessor = nil
         secondaryLoudnessCompensator = nil
         secondaryLoudnessEqualizerProcessor = nil
+        secondaryRenderClock = nil
     }
 
     private func promoteSecondaryToPrimary() {
         primaryResources = secondaryResources
         secondaryResources = TapResources()
 
-        // Recompute ramp coefficient for the new primary's sample rate.
-        // After promotion the promoted IO proc switches to primary-role state
-        // and starts using `rampCoefficient`, so it must match the new device.
-        if let deviceSampleRate = try? primaryResources.aggregateDeviceID.readNominalSampleRate() {
-            rampCoefficient = Self.rampCoefficient(forSampleRate: deviceSampleRate)
+        // Carry the rate actually used by the secondary DSP into the primary
+        // snapshot. Re-reading HAL here could hide a rate change that happened
+        // after secondary creation, leaving its DSP at the earlier rate.
+        rampCoefficient = secondaryRampCoefficient
+        if let clock = secondaryRenderClock {
+            recordRenderClock(aggregateDeviceID: primaryResources.aggregateDeviceID, sampleRate: clock.sampleRate)
+        } else {
+            renderClock = nil
         }
+        secondaryRenderClock = nil
 
         // Adopt secondary EQ processors as primary.
         // The old primary processors may still be referenced by a just-completed primary callback,
@@ -1216,9 +1256,8 @@ final class ProcessTapController: ProcessTapControlling {
             throw CrossfadeError.deviceNotReady
         }
 
-        nextCallbackID += 1
-        _primaryCallbackID = nextCallbackID
-        let switchCallbackID = nextCallbackID
+        let switchCallbackID = reservePrimaryCallbackID()
+        let switchTiming = RenderTimingState()
         err = AudioDeviceCreateIOProcIDWithBlock(&newResources.deviceProcID, newResources.aggregateDeviceID, queue) { [weak self] _, inInputData, _, outOutputData, _ in
             guard let self else {
                 // Zero output to prevent garbage audio if controller is deallocated
@@ -1228,7 +1267,7 @@ final class ProcessTapController: ProcessTapControlling {
                 }
                 return
             }
-            self.processAudioCallback(inInputData, to: outOutputData, callbackID: switchCallbackID)
+            self.processAudioCallback(inInputData, to: outOutputData, callbackID: switchCallbackID, timing: switchTiming)
         }
         guard err == noErr else {
             newResources.destroy()
@@ -1249,7 +1288,8 @@ final class ProcessTapController: ProcessTapControlling {
         targetDeviceUIDs = outputUIDs
         currentDeviceUIDs = outputUIDs
 
-        if let deviceSampleRate = try? primaryResources.aggregateDeviceID.readNominalSampleRate() {
+        let deviceSampleRate = try? primaryResources.aggregateDeviceID.readNominalSampleRate()
+        if let deviceSampleRate {
             rampCoefficient = 1 - exp(-1 / (Float(deviceSampleRate) * 0.030))
             eqProcessor?.updateSampleRate(deviceSampleRate)
             autoEQProcessor?.updateSampleRate(deviceSampleRate)
@@ -1265,10 +1305,16 @@ final class ProcessTapController: ProcessTapControlling {
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { _ = oldLE }
             }
         }
+        if let activeSampleRate = deviceSampleRate ?? renderClock?.sampleRate {
+            recordRenderClock(aggregateDeviceID: primaryResources.aggregateDeviceID, sampleRate: activeSampleRate)
+        } else {
+            renderClock = nil
+        }
     }
 
     private func cleanupPartialActivation() {
         primaryResources.destroy()
+        renderClock = nil
     }
 
     // `processMappedBuffers` (the per-frame mixer, ~165 lines) is defined in
@@ -1294,16 +1340,16 @@ final class ProcessTapController: ProcessTapControlling {
     /// - Use Objective-C messaging
     /// - Call print/logging functions
     /// - Perform file/network I/O
-    private func processAudioCallback(
+    // Internal for direct buffer regression tests; production calls originate in HAL IO procs.
+    func processAudioCallback(
         _ inputBufferList: UnsafePointer<AudioBufferList>,
         to outputBufferList: UnsafeMutablePointer<AudioBufferList>,
-        callbackID: UInt32
+        callbackID: UInt32,
+        timing: RenderTimingState? = nil
     ) {
-        _lastRenderHostTime = mach_absolute_time()
-        _hasRenderedAudio = true
-
-        let isPrimary = (callbackID == _primaryCallbackID)
-        let isSecondary = !isPrimary && (callbackID == _secondaryCallbackID)
+        // Zero is the invalidation sentinel and can never identify a live IO proc.
+        let isPrimary = callbackID != 0 && (callbackID == _primaryCallbackID)
+        let isSecondary = callbackID != 0 && !isPrimary && (callbackID == _secondaryCallbackID)
 
         let outputBuffers = UnsafeMutableAudioBufferListPointer(outputBufferList)
 
@@ -1314,6 +1360,23 @@ final class ProcessTapController: ProcessTapControlling {
                 if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
             }
             return
+        }
+
+        // An asynchronously retired IO proc may keep firing while HAL tears it
+        // down. Its silent buffers must not make the replacement look healthy.
+        _lastRenderHostTime = mach_absolute_time()
+        _hasRenderedAudio = true
+        if isPrimary {
+            var frames = 0
+            for buffer in outputBuffers {
+                frames = max(frames, Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * max(1, Int(buffer.mNumberChannels))))
+            }
+            let time = Double(_lastRenderHostTime) * Self.hostTimeNanosScale / 1_000_000_000
+            if timing?.tracker.record(time: time, callbackID: callbackID,
+                                      bufferDuration: Double(frames) / max(1, primaryRenderSampleRate)) == true {
+                OSAtomicIncrement64Barrier(&renderLongGaps)
+            }
+            OSAtomicIncrement64Barrier(&renderCallbackCount)
         }
 
         // SAFETY: Mutable cast required by UnsafeMutableAudioBufferListPointer API,

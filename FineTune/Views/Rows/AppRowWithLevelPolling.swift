@@ -40,6 +40,7 @@ struct AppRowWithLevelPolling: View {
     let isEQExpanded: Bool
     let onEQToggle: () -> Void
     let isFocused: Bool
+    let textEntry: PopupTextEntryCoordinator?
     let isMediaTarget: Bool
     let onToggleMediaTarget: () -> Void
 
@@ -78,6 +79,7 @@ struct AppRowWithLevelPolling: View {
         isEQExpanded: Bool = false,
         onEQToggle: @escaping () -> Void = {},
         isFocused: Bool = false,
+        textEntry: PopupTextEntryCoordinator? = nil,
         isMediaTarget: Bool = false,
         onToggleMediaTarget: @escaping () -> Void = {}
     ) {
@@ -111,6 +113,7 @@ struct AppRowWithLevelPolling: View {
         self.isEQExpanded = isEQExpanded
         self.onEQToggle = onEQToggle
         self.isFocused = isFocused
+        self.textEntry = textEntry
         self.isMediaTarget = isMediaTarget
         self.onToggleMediaTarget = onToggleMediaTarget
     }
@@ -156,6 +159,7 @@ struct AppRowWithLevelPolling: View {
                 isEQExpanded: isEQExpanded,
                 onEQToggle: onEQToggle,
                 isFocused: isFocused,
+                textEntry: textEntry,
                 isMediaTarget: isMediaTarget,
                 onToggleMediaTarget: onToggleMediaTarget
             )

@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 struct SettingsRow<Trailing: View>: View {
+    @Environment(\.settingsShowsHelp) private var showHelp
     private let title: String
     private let description: String?
     private let systemImage: String?
@@ -21,32 +22,33 @@ struct SettingsRow<Trailing: View>: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 16) {
-            if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(.title2, weight: .regular))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(DesignTokens.Colors.textSecondary)
-                    .frame(width: 28, height: 28)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.body)
-                    .foregroundStyle(DesignTokens.Colors.textPrimary)
-                if let description {
-                    Text(description)
-                        .font(DesignTokens.Typography.rowDescription)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 16) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 16))
+                        .foregroundStyle(.blue)
+                        .frame(width: 22)
+                        .accessibilityHidden(true)
                 }
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                trailing()
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            Spacer(minLength: 16)
-            trailing()
+            if showHelp, let description {
+                Text(description)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .frame(minHeight: 52)
+        .frame(minHeight: 48)
         .contentShape(Rectangle())
     }
 }
@@ -57,6 +59,6 @@ struct SettingsRow<Trailing: View>: View {
 struct SettingsRowDivider: View {
     var body: some View {
         Divider()
-            .padding(.leading, 16)
+            .padding(.horizontal, 14)
     }
 }

@@ -56,16 +56,11 @@ struct UpdatesTab: View {
     // MARK: - Body
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                currentVersionCard
-                softwareUpdatesSection
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 24) {
+            currentVersionCard
+            softwareUpdatesSection
         }
-        .scrollIndicators(.never)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Current Version Card
@@ -79,10 +74,10 @@ struct UpdatesTab: View {
     private var currentVersionCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 14) {
-                Image(systemName: "checkmark.seal.fill")
+                Image(systemName: "arrow.down.circle")
                     .font(.system(size: 28, weight: .regular))
                     .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(.blue)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("FineTune \(versionShort)")
@@ -115,14 +110,7 @@ struct UpdatesTab: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(DesignTokens.Colors.eqCardBackground)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(DesignTokens.Colors.eqCardBorder, lineWidth: 0.6)
-        }
+        .modifier(SettingsCardSurface())
     }
 
     // MARK: - Software Updates section

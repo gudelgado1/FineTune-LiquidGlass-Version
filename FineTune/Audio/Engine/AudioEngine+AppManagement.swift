@@ -192,6 +192,7 @@ extension AudioEngine {
     }
 
     func applyPersistedSettings() {
+        guard captureRebuildTask == nil else { return }
         guard permission.status == .authorized else { return }
         for app in apps {
             guard !appliedPIDs.contains(app.id) else { continue }

@@ -1,7 +1,41 @@
 // FineTune/Audio/Engine/AudioEngine+Resilience.swift
 import AppKit
+import AudioToolbox
 import Foundation
 import os
+
+/// Values read together off-main; no engine or tap objects cross to the worker.
+nonisolated struct WakeRecoverySnapshot: Sendable {
+    let liveProcessObjectIDs: Set<AudioObjectID>
+    let aliveDeviceIDs: Set<AudioDeviceID>
+    let displayDeviceIDs: Set<AudioDeviceID>
+    var nominalSampleRates: [AudioDeviceID: Double] = [:]
+
+    static func read(deviceIDs: [AudioDeviceID]) -> Self? {
+        guard let processIDs = try? AudioObjectID.readProcessList() else { return nil }
+        var alive: Set<AudioDeviceID> = []
+        var displays: Set<AudioDeviceID> = []
+        var sampleRates: [AudioDeviceID: Double] = [:]
+        for id in deviceIDs {
+            if id.isDeviceAlive() { alive.insert(id) }
+            let transport = id.readTransportType()
+            if transport == .displayPort || transport == .hdmi { displays.insert(id) }
+            if let rate = try? id.readNominalSampleRate(), rate.isFinite, rate > 0 {
+                sampleRates[id] = rate
+            }
+        }
+        return Self(liveProcessObjectIDs: Set(processIDs), aliveDeviceIDs: alive,
+                    displayDeviceIDs: displays, nominalSampleRates: sampleRates)
+    }
+
+    func clockChanged(from clock: TapRenderClock?) -> Bool {
+        guard let clock, let rate = nominalSampleRates[clock.aggregateDeviceID],
+              rate.isFinite, rate > 0 else { return false }
+        // Nominal rates describe the format; actual clock drift is intentionally
+        // not compared, since it fluctuates during normal playback.
+        return rate != clock.sampleRate
+    }
+}
 
 // MARK: - System-pressure resilience
 //
@@ -31,6 +65,28 @@ import os
 
 @MainActor
 extension AudioEngine {
+
+    private func readWakeRecoverySnapshot() async -> WakeRecoverySnapshot? {
+        guard !Task.isCancelled, !taps.isEmpty, !wakeRecoveryQueryInFlight,
+              audioSystemHealth.allowsPeriodicHALWork else { return nil }
+        wakeRecoveryQueryInFlight = true
+        defer { wakeRecoveryQueryInFlight = false }
+        let generation = wakeRecoveryGeneration
+        let deviceIDs = Array(Set(taps.values.flatMap { tap in
+            let outputs = tap.currentDeviceUIDs.compactMap { deviceMonitor.device(for: $0)?.id }
+            return outputs + (tap.renderClock.map { [$0.aggregateDeviceID] } ?? [])
+        }))
+        let query = wakeRecoveryQuery
+        let result = await HALExecutor.run(timeout: wakeRecoveryTimeout) { query(deviceIDs) }
+        guard !Task.isCancelled, generation == wakeRecoveryGeneration else { return nil }
+        guard let completed = result else {
+            audioSystemHealth.reportTimeout()
+            return nil
+        }
+        guard audioSystemHealth.allowsPeriodicHALWork, let snapshot = completed else { return nil }
+        audioSystemHealth.reportSuccess()
+        return snapshot
+    }
 
     // MARK: Liveness recovery
 
@@ -93,6 +149,7 @@ extension AudioEngine {
     /// revive as zombies. When both notifications fire (laptops), the shared
     /// task IDs coalesce the two into one sweep.
     func handleSystemDidWake(trigger: String = "systemDidWake") {
+        wakeRecoveryGeneration &+= 1
         DiagnosticLog.log("wake: \(trigger) received — scheduling rebuild passes (2s, 12s)")
         setDSPLoadShed(false)
         taskScheduler.schedule(.wakeRebuild, after: .seconds(2)) { [weak self] in
@@ -110,7 +167,7 @@ extension AudioEngine {
         taskScheduler.schedule(.wakeRebuildSecondPass, after: .seconds(12)) { [weak self] in
             guard let self else { return }
             let forced = await self.rebuildDisplayRoutedTaps(respectCooldown: true)
-            await self.rebuildActiveTapsAfterWake(excluding: forced)
+            await self.rebuildActiveTapsAfterWake(excluding: forced, respectCooldown: true)
         }
     }
 
@@ -133,50 +190,55 @@ extension AudioEngine {
     ///   and would otherwise look "stuck").
     @discardableResult
     func rebuildDisplayRoutedTaps(respectCooldown: Bool) async -> Set<pid_t> {
-        guard !taps.isEmpty else { return [] }
+        let candidates = taps.map { (pid: $0.key, tap: $0.value, routes: $0.value.currentDeviceUIDs) }
+        guard let snapshot = await readWakeRecoverySnapshot() else { return [] }
         let activePIDs = Set(apps.map { $0.id })
-        let liveObjectIDs = liveProcessObjectIDs()
+        let liveObjectIDs = snapshot.liveProcessObjectIDs
         let now = Date()
-        let displayPIDs: [pid_t] = taps.compactMap { pid, tap in
+        let displayCandidates = candidates.filter { pid, tap, routes in
+            guard taps[pid] === tap, tap.currentDeviceUIDs == routes else { return false }
             if respectCooldown, let cooldownEnd = tapRecoveryCooldownUntil[pid], now < cooldownEnd {
-                return nil
+                return false
             }
             let routedThroughDisplay = tap.currentDeviceUIDs.contains { uid in
                 guard let device = deviceMonitor.device(for: uid) else { return false }
-                return isDisplayTransport(device.id)
+                return snapshot.displayDeviceIDs.contains(device.id)
             }
-            guard routedThroughDisplay else { return nil }
+            guard routedThroughDisplay else { return false }
             let isActive = activePIDs.contains(pid)
             let isPausedAlive = !tap.app.processObjectIDs.isEmpty
                 && !liveObjectIDs.isDisjoint(with: tap.app.processObjectIDs)
-            guard isActive || isPausedAlive else { return nil }
+            guard isActive || isPausedAlive else { return false }
             // Only rebuild once the display's audio device is actually back.
             let targetAlive = tap.currentDeviceUIDs.contains { uid in
                 guard let id = deviceMonitor.device(for: uid)?.id else { return false }
-                return isAliveCheck(id)
+                return snapshot.aliveDeviceIDs.contains(id)
             }
-            return targetAlive ? pid : nil
+            return targetAlive
         }
+        let displayPIDs = displayCandidates.map(\.pid)
         guard !displayPIDs.isEmpty else { return [] }
         logger.notice("Display wake: force-rebuilding \(displayPIDs.count) display-routed tap(s)")
         DiagnosticLog.log("wake: force-rebuilding \(displayPIDs.count) display-routed tap(s): \(displayPIDs)")
-        for pid in displayPIDs {
+        var rebuilt: Set<pid_t> = []
+        for (pid, tap, routes) in displayCandidates {
+            guard !Task.isCancelled, audioSystemHealth.allowsPeriodicHALWork else { break }
+            guard taps[pid] === tap, tap.currentDeviceUIDs == routes else { continue }
             tapRecoveryCooldownUntil.removeValue(forKey: pid)
-            await recreateTap(for: pid)
+            await recreateTap(for: pid, knownLiveProcessObjectIDs: liveObjectIDs)
+            rebuilt.insert(pid)
         }
-        return Set(displayPIDs)
+        return rebuilt
     }
 
     /// Rebuilds the *stuck* taps after standby, clearing their per-PID cooldown
     /// first (wake is an explicit rebuild event).
     ///
-    /// Selective by design: a healthy aggregate fires its IO proc continuously —
-    /// even while the app outputs silence — so a tap that delivered a callback in
-    /// the last couple of seconds is provably still capturing and is left alone.
-    /// Only active taps with NO recent callback (a stalled/zombie IO proc, the
-    /// post-standby failure) are torn down and recreated. This avoids an
-    /// unnecessary audio blip and the per-tap `activate()` main-thread block on
-    /// every healthy tap each time the machine wakes.
+    /// A recent callback proves that the IO proc is running, but its clock may
+    /// have changed while the UID stayed the same. Rebuild when the aggregate's
+    /// nominal sample rate no longer matches the rate used to configure DSP,
+    /// as well as when callbacks stalled. All HAL reads remain off-main and
+    /// deadline-bounded; the render thread never queries device properties.
     ///
     /// The target-device-alive guard keeps a tap whose device is still asleep
     /// (e.g. an HDMI monitor) out of the rebuild — the `recreateDeadTaps()`
@@ -188,11 +250,21 @@ extension AudioEngine {
     /// which this catches.
     /// - Parameter excluding: PIDs just force-rebuilt by the display pass — a
     ///   freshly-activated tap has no callbacks yet and would look "stuck" here.
-    func rebuildActiveTapsAfterWake(excluding: Set<pid_t> = []) async {
+    func rebuildActiveTapsAfterWake(excluding: Set<pid_t> = [], respectCooldown: Bool = false) async {
+        let candidates = taps.map {
+            (pid: $0.key, tap: $0.value, routes: $0.value.currentDeviceUIDs, clock: $0.value.renderClock)
+        }
+        guard let snapshot = await readWakeRecoverySnapshot() else { return }
         let activePIDs = Set(apps.map { $0.id })
-        let liveObjectIDs = liveProcessObjectIDs()
-        let stuckPIDs: [pid_t] = taps.compactMap { pid, tap in
-            guard !excluding.contains(pid) else { return nil }
+        let liveObjectIDs = snapshot.liveProcessObjectIDs
+        let now = Date()
+        let stuckCandidates = candidates.filter { pid, tap, routes, clock in
+            guard taps[pid] === tap, tap.currentDeviceUIDs == routes,
+                  tap.renderClock == clock,
+                  !excluding.contains(pid) else { return false }
+            if respectCooldown, let cooldownEnd = tapRecoveryCooldownUntil[pid], now < cooldownEnd {
+                return false
+            }
             // Active apps AND paused-but-alive apps (warm taps) are both
             // eligible: a healthy warm tap keeps firing its IO proc even while
             // the app is paused (the aggregate keeps clocking), so "no recent
@@ -202,24 +274,33 @@ extension AudioEngine {
             let isActive = activePIDs.contains(pid)
             let isPausedAlive = !tap.app.processObjectIDs.isEmpty
                 && !liveObjectIDs.isDisjoint(with: tap.app.processObjectIDs)
-            guard isActive || isPausedAlive else { return nil }
-            guard !tap.hasRecentAudioCallback(within: 2.0) else { return nil }
+            guard isActive || isPausedAlive else { return false }
+            guard !tap.hasRecentAudioCallback(within: 2.0) || snapshot.clockChanged(from: clock) else { return false }
             let targetAlive = tap.currentDeviceUIDs.contains { uid in
                 guard let id = deviceMonitor.device(for: uid)?.id else { return false }
-                return isAliveCheck(id)
+                return snapshot.aliveDeviceIDs.contains(id)
             }
-            return targetAlive ? pid : nil
+            return targetAlive
         }
+        let stuckPIDs = stuckCandidates.map(\.pid)
         if !stuckPIDs.isEmpty {
-            logger.notice("Wake: rebuilding \(stuckPIDs.count) stuck tap(s) (no recent callback after settle)")
-            DiagnosticLog.log("wake: rebuilding \(stuckPIDs.count) stuck tap(s) (no recent callback): \(stuckPIDs)")
-            for pid in stuckPIDs {
+            logger.notice("Wake: rebuilding \(stuckPIDs.count) tap(s) with stalled callbacks or a changed clock")
+            for (pid, tap, routes, clock) in stuckCandidates {
+                guard !Task.isCancelled, audioSystemHealth.allowsPeriodicHALWork else { break }
+                guard taps[pid] === tap, tap.currentDeviceUIDs == routes, tap.renderClock == clock else { continue }
+                if snapshot.clockChanged(from: clock), let clock,
+                   let rate = snapshot.nominalSampleRates[clock.aggregateDeviceID] {
+                    DiagnosticLog.log("wake: pid=\(pid) render clock changed \(clock.sampleRate) → \(rate) Hz — rebuilding")
+                } else {
+                    DiagnosticLog.log("wake: pid=\(pid) no recent callback — rebuilding")
+                }
                 tapRecoveryCooldownUntil.removeValue(forKey: pid)
-                await recreateTap(for: pid)
+                await recreateTap(for: pid, knownLiveProcessObjectIDs: liveObjectIDs)
             }
         }
-        // Catch any taps that died outright (e.g. their device vanished).
-        await recreateDeadTaps()
+        // Dead aggregates also have no callbacks and are covered above. Leave
+        // other taps to the periodic liveness pass, avoiding synchronous HAL
+        // reads on the wake path after its deadline-bounded snapshot.
     }
 
     /// Rebuilds engine state after `coreaudiod` was restarted.
@@ -234,6 +315,8 @@ extension AudioEngine {
     /// via `destroyAsync`). Their real job here is untracking the dead aggregate
     /// IDs from `CrashGuard`.
     func resyncAfterCoreAudioRestart() async {
+        captureRebuildTask?.cancel()
+        _ = await captureRebuildTask?.value
         logger.notice("Resyncing engine after Core Audio restart")
 
         // 1. Drop every tap and all per-PID coordination state.
@@ -266,12 +349,16 @@ extension AudioEngine {
     /// Tears down every tap and clears all per-PID coordination state, leaving
     /// the monitors and device state untouched. Shared by the Core Audio resync
     /// and the manual capture rebuild.
-    private func discardAllTaps() {
-        for tap in taps.values { tap.invalidate() }
+    private func discardAllTaps(invalidate: Bool = true) {
+        wakeRecoveryGeneration &+= 1
+        if invalidate {
+            for tap in taps.values { tap.invalidate() }
+        }
         taps.removeAll()
         appliedPIDs.removeAll()
         pidsBeingCreated.removeAll()
         pidsBeingRecreated.removeAll()
+        tapRecreationTokens.removeAll()
         tapRecoveryCooldownUntil.removeAll()
         for task in pendingCleanup.values { task.cancel() }
         pendingCleanup.removeAll()
@@ -292,6 +379,7 @@ extension AudioEngine {
     ///   refused because the audio system isn't answering.
     @discardableResult
     func rebuildAllTaps() async -> Int? {
+        if let task = captureRebuildTask { return await task.value }
         guard audioSystemHealth.allowsPeriodicHALWork else {
             DiagnosticLog.log("capture: manual rebuild REFUSED — audio system unresponsive")
             return nil
@@ -300,22 +388,29 @@ extension AudioEngine {
         logger.notice("Manual capture rebuild requested")
         DiagnosticLog.log("capture: manual rebuild requested (\(taps.count) tap(s) live)")
 
-        discardAllTaps()
-
-        // Let the async CoreAudio teardown land before rebuilding on the same
-        // devices — recreating immediately can collide with the dying IO procs.
-        try? await Task.sleep(for: .milliseconds(400))
-
-        // Act on what the HAL reports NOW: the whole point of this button is to
-        // recover an app the last published list missed.
-        processMonitor.refreshNow()
-        try? await Task.sleep(for: .milliseconds(300))
-
-        applyPersistedSettings()
-
-        logger.notice("Manual capture rebuild complete — \(self.taps.count) tap(s)")
-        DiagnosticLog.log("capture: manual rebuild complete — \(taps.count) tap(s)")
-        return taps.count
+        let task = Task<Int?, Never> { @MainActor [self] in
+            let retired = Array(taps.values)
+            let alreadyRetiring = Array(pendingTapTeardowns.values)
+            discardAllTaps(invalidate: false)
+            // Keep every creation path gated until actual HAL teardown finishes.
+            // A fixed delay did not stop the health loop from recreating early.
+            for tap in retired { await tap.invalidateAsync() }
+            for teardown in alreadyRetiring { await teardown.value }
+            guard !Task.isCancelled else { return nil }
+            processMonitor.refreshNow()
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, audioSystemHealth.allowsPeriodicHALWork else { return nil }
+            captureRebuildTask = nil
+            applyPersistedSettings()
+            DiagnosticLog.log("capture: manual rebuild complete — \(taps.count) tap(s)")
+            return taps.count
+        }
+        captureRebuildTask = task
+        let result = await task.value
+        // The task clears the gate before synchronous creation on success.
+        // On cancellation it remains held until all old resources are retired.
+        if result == nil { captureRebuildTask = nil }
+        return result
     }
 
     /// Debounced entry point for the proactive triggers. Coalesces bursts
@@ -355,6 +450,7 @@ extension AudioEngine {
 
     /// Cancels the memory-pressure source and removes the wake / activation observers.
     func stopResilienceObservers() {
+        wakeRecoveryGeneration &+= 1
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
         if let token = wakeObserver {

@@ -36,6 +36,8 @@ struct InactiveAppRow: View {
     let isEQExpanded: Bool
     let onEQToggle: () -> Void
     let isFocused: Bool
+    /// Uses the same percentage editor as active app rows.
+    let textEntry: PopupTextEntryCoordinator?
     let isMediaTarget: Bool
     let onToggleMediaTarget: () -> Void
 
@@ -71,6 +73,7 @@ struct InactiveAppRow: View {
         isEQExpanded: Bool = false,
         onEQToggle: @escaping () -> Void = {},
         isFocused: Bool = false,
+        textEntry: PopupTextEntryCoordinator? = nil,
         isMediaTarget: Bool = false,
         onToggleMediaTarget: @escaping () -> Void = {}
     ) {
@@ -102,6 +105,7 @@ struct InactiveAppRow: View {
         self.isEQExpanded = isEQExpanded
         self.onEQToggle = onEQToggle
         self.isFocused = isFocused
+        self.textEntry = textEntry
         self.isMediaTarget = isMediaTarget
         self.onToggleMediaTarget = onToggleMediaTarget
         self._localEQSettings = State(initialValue: eqSettings)
@@ -181,6 +185,8 @@ struct InactiveAppRow: View {
                     boost: boost,
                     isEQExpanded: isEQExpanded,
                     isParentHovered: isRowHovered,
+                    isRowFocused: isFocused,
+                    textEntry: textEntry,
                     onVolumeChange: onVolumeChange,
                     onMuteChange: onMuteChange,
                     onBoostChange: onBoostChange,
