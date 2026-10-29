@@ -1,0 +1,56 @@
+name: Build and isolated tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Record toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          sw_vers
+      - name: Cache pinned packages
+        uses: actions/cache@v4
+        with:
+          path: build/ci/SourcePackages
+          key: ${{ runner.os }}-${{ runner.arch }}-packages-${{ hashFiles('FineTune.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+      - name: Run all unit tests in the isolated host
+        run: python3 scripts/run-tests.py --build-dir build/ci
+      - name: Build optimized Release
+        run: |
+          xcodebuild build \
+            -project FineTune.xcodeproj -scheme FineTune -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath build/ci/DerivedData \
+            -clonedSourcePackagesDirPath build/ci/SourcePackages \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO > build/ci/release.log 2>&1
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finetune-validation-${{ github.run_id }}
+          path: |
+            build/ci/runs/
+            build/ci/release.log
+          if-no-files-found: warn
+          retention-days: 14

@@ -21,11 +21,7 @@ nonisolated enum DiagnosticLog {
     /// so at most ~4 MB of history is kept.
     private static let maxBytes: UInt64 = 2_000_000
 
-    private static let logDirectory: URL = {
-        FileManager.default
-            .urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/FineTune", isDirectory: true)
-    }()
+    private static let logDirectory = AppDataLocations.diagnostics
     private static let logFile = logDirectory.appendingPathComponent("Diagnostics.log")
 
     /// Touched only on `queue`, which serializes every use. `DateFormatter` is
@@ -45,6 +41,9 @@ nonisolated enum DiagnosticLog {
             append(line)
         }
     }
+
+    /// Wait for queued diagnostic writes in offline tests and export flows. Never call from RT.
+    static func flush() { queue.sync {} }
 
     private static func append(_ line: String) {
         let fm = FileManager.default

@@ -1,7 +1,7 @@
 // FineTune/Settings/SettingsManager.swift
 import Foundation
 import os
-import ServiceManagement
+
 
 
 // MARK: - Settings Manager
@@ -11,6 +11,7 @@ import ServiceManagement
 final class SettingsManager {
     private var settings: Settings
     private var saveTask: Task<Void, Never>?
+    private let loginService: any LaunchAtLoginManaging
     private let settingsURL: URL
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "SettingsManager")
 
@@ -114,8 +115,10 @@ final class SettingsManager {
         }
     }
 
-    init(directory: URL? = nil) {
-        let baseDir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("FineTune")
+    init(directory: URL? = nil, loginService: (any LaunchAtLoginManaging)? = nil) {
+        self.loginService = loginService ?? (AppDataLocations.isUnitTesting
+            ? InMemoryLaunchAtLoginService() : SystemLaunchAtLoginService())
+        let baseDir = directory ?? AppDataLocations.applicationSupport
         self.settingsURL = baseDir.appendingPathComponent("settings.json")
         self.settings = Settings()
         loadFromDisk()
@@ -719,13 +722,8 @@ final class SettingsManager {
 
     private func setLaunchAtLogin(_ enabled: Bool) {
         do {
-            if enabled {
-                try SMAppService.mainApp.register()
-                logger.info("Registered for launch at login")
-            } else {
-                try SMAppService.mainApp.unregister()
-                logger.info("Unregistered from launch at login")
-            }
+            try loginService.setEnabled(enabled)
+            logger.info("Launch at login set to \(enabled)")
         } catch {
             logger.error("Failed to set launch at login: \(error.localizedDescription)")
         }
@@ -733,7 +731,7 @@ final class SettingsManager {
 
     /// Returns the actual launch at login status from the system
     var isLaunchAtLoginEnabled: Bool {
-        SMAppService.mainApp.status == .enabled
+        loginService.isEnabled
     }
 
     // MARK: - Reset All Settings
@@ -796,7 +794,7 @@ final class SettingsManager {
         settings.userEQPresets.removeAll()
 
         // Also unregister from launch at login
-        try? SMAppService.mainApp.unregister()
+        try? loginService.setEnabled(false)
 
         scheduleSave()
         logger.info("Reset all settings to defaults")

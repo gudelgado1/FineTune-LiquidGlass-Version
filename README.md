@@ -76,7 +76,7 @@ On top of upstream FineTune, this fork adds:
 ```bash
 git clone https://github.com/gudelgado1/FineTune-LiquidGlass-Version.git
 cd FineTune-LiquidGlass-Version
-open FineTune.xcodeproj   # Xcode 16 — build & run the "FineTune" scheme
+open FineTune.xcodeproj   # Xcode 26+ — build & run the "FineTune" scheme
 ```
 
 **Manual** — download the latest build from [Releases](https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/latest), move it to `/Applications`, and open it.

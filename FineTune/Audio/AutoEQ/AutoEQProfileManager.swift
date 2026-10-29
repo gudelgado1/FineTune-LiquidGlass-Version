@@ -36,6 +36,8 @@ final class AutoEQProfileManager {
             profiles[profile.id] = profile
         }
 
+        // Unit tests use their own profiles and never start background network work.
+        guard !AppDataLocations.isUnitTesting else { return }
         // Load catalog from cache/GitHub
         Task { @MainActor in
             await self.fetcher.loadCatalog()

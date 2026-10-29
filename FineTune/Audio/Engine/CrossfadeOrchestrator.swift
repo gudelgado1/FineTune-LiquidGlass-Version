@@ -105,13 +105,13 @@ enum CrossfadeConfig {
     /// User override via UserDefaults — when present, overrides ALL profile
     /// durations. Useful for QA/regression testing.
     static var duration: TimeInterval {
-        let custom = UserDefaults.standard.double(forKey: "FineTuneCrossfadeDuration")
+        let custom = AppDataLocations.preferences.double(forKey: "FineTuneCrossfadeDuration")
         return custom > 0 ? custom : defaultDuration
     }
 
     /// Duration for a given profile, honoring the UserDefaults override.
     static func duration(for profile: CrossfadeProfile) -> TimeInterval {
-        let custom = UserDefaults.standard.double(forKey: "FineTuneCrossfadeDuration")
+        let custom = AppDataLocations.preferences.double(forKey: "FineTuneCrossfadeDuration")
         return custom > 0 ? custom : profile.crossfadeDuration
     }
 

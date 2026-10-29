@@ -75,7 +75,11 @@ def isolate_unit_tests(manifest, run_dir, developer, env):
     # XCTestBundleInject would execute the production entry point. The inert
     # xctest host instead loads the app's Debug library as a normal dependency.
     target['EnvironmentVariables'] = {}
+    test_root = run_dir / 'unit-data'
+    test_root.mkdir()
     target['TestingEnvironmentVariables'] = {
+        'FINETUNE_TEST_MODE': 'unit',
+        'FINETUNE_TEST_DATA_ROOT': str(test_root),
         'DYLD_LIBRARY_PATH': ':'.join(map(str, [app_macos, build_products, platform / 'usr/lib'])),
         'DYLD_FRAMEWORK_PATH': ':'.join(map(str, [build_products, build_products / 'PackageFrameworks',
                                                app_contents / 'Frameworks', platform / 'Library/Frameworks']))
