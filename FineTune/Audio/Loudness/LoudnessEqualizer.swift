@@ -8,14 +8,11 @@ import Foundation
 ///
 /// **RT-safety contract**: All mutable state is owned exclusively by the real-time
 /// audio thread after init. Settings and sample-rate changes are handled by creating
-/// a **new** instance on the main thread, atomically swapping the `nonisolated(unsafe)`
-/// pointer in ProcessTapController, and deferring destruction of the old instance by
-/// 500ms (matching the BiquadProcessor.swapSetup pattern).
-///
-/// This eliminates the data-race window that existed when `updateSettings()` and
-/// `updateSampleRate()` mutated sub-processor state from the main thread while
-/// `process()` read/wrote from the RT thread.
-final class LoudnessEqualizer: @unchecked Sendable {
+/// a **new** instance on control. TapRenderContext pins its snapshot until the
+/// next callback entry, keeping Swift temporary references inside the old IO
+/// callback from becoming the last owner on the real-time thread. Final context
+/// destruction waits for native IO-proc removal acknowledgement.
+nonisolated final class LoudnessEqualizer: @unchecked Sendable {
 
     // MARK: - Private state (exclusively RT-thread owned after init)
 

@@ -7,7 +7,7 @@ import Accelerate
 /// Subclass of `BiquadProcessor` — inherits delay buffer management, atomic setup swaps,
 /// stereo biquad processing, and NaN safety. This class adds EQ-specific settings
 /// management and coefficient computation.
-final class EQProcessor: BiquadProcessor, @unchecked Sendable {
+nonisolated final class EQProcessor: BiquadProcessor, @unchecked Sendable {
 
     /// Currently applied EQ settings (needed for sample rate recalculation)
     private var _currentSettings: EQSettings?

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 
 SOURCES = [
+    'Audio/Engine/OwnedHALExecutor.swift',
     'Audio/Engine/RealtimeSnapshot.swift', 'Audio/Engine/HALExecutor.swift',
     'Audio/Types/BiquadProcessable.swift', 'Audio/EQ/BiquadMath.swift',
     'Audio/EQ/BiquadProcessor.swift', 'Audio/EQ/EQProcessor.swift',
@@ -18,7 +19,7 @@ SOURCES = [
     'Models/EQSettings.swift', 'Models/AutoEQProfile.swift',
 ]
 TESTS = [
-    'CrossfadeReadinessTests.swift', 'DeviceTransitionCoordinatorTests.swift', 'CrossfadeConcurrencyTests.swift', 'CrossfadeStateAdversarialTests.swift',
+    'OwnedHALExecutorTests.swift', 'CrossfadeReadinessTests.swift', 'DeviceTransitionCoordinatorTests.swift', 'CrossfadeConcurrencyTests.swift', 'CrossfadeStateAdversarialTests.swift',
     'RealtimeSnapshotTests.swift', 'HALWorkerPoolTests.swift',
     'BiquadProcessorSignalTests.swift', 'BiquadProcessorSignalAdversarialTests.swift',
 ]

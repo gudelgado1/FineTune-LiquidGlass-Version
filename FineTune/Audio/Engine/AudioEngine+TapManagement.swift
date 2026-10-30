@@ -31,6 +31,7 @@ extension AudioEngine {
             deviceUIDs = selectedUIDs
         }
 
+        cancelPendingCreation(for: app.id)
         // Update or create tap with the device set
         if let tap = taps[app.id] {
             // Tap exists - update devices
@@ -68,69 +69,69 @@ extension AudioEngine {
         return state
     }
 
-    /// Creates a tap with the specified device UIDs
+    /// A placeholder makes pending native capture participate in parameter and
+    /// lifecycle changes. Legacy test adapters may complete inline through the
+    /// same completion interface; native capture always suspends for HAL work.
     func ensureTapWithDevices(for app: AudioApp, deviceUIDs: [String]) {
-        guard captureRebuildTask == nil else { return }
-        guard !deviceUIDs.isEmpty else { return }
-        guard taps[app.id] == nil else { return }
-        guard !pidsBeingRecreated.contains(app.id) else { return }  // recreation in flight
-        guard !pidsBeingCreated.contains(app.id) else { return }  // creation in flight (nested run loop re-entry)
-        guard permission.status == .authorized else { return }
-
-        // activate() below pumps a nested run loop (waitUntilReady), which can
-        // re-enter this method for the same pid via the health monitor or
-        // onAppsChanged before `taps[app.id]` is set — creating a duplicate tap
-        // whose aggregate device leaks. Mark creation in flight for the window.
+        guard captureRebuildTask == nil, audioSystemHealth.allowsPeriodicHALWork,
+              !deviceUIDs.isEmpty, taps[app.id] == nil,
+              !pidsBeingRecreated.contains(app.id), !pidsBeingCreated.contains(app.id),
+              permission.status == .authorized else { return }
         pidsBeingCreated.insert(app.id)
-        defer { pidsBeingCreated.remove(app.id) }
-
-        let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: deviceUIDs, isFollowsDefault: followsDefault.contains(app.id))
+        let token = UUID()
+        creationTokens[app.id] = token
+        let source = preferredTapSourceDeviceUID(forOutputUIDs: deviceUIDs, isFollowsDefault: followsDefault.contains(app.id))
         do {
-            let tap = try tapFactory(app, deviceUIDs, preferredTapSourceUID)
+            let tap = try tapFactory(app, deviceUIDs, source)
             applyTapOutputState(to: tap, for: app.id, deviceUIDs: deviceUIDs)
-
-            let initialDSP = initialDSPConfiguration(for: tap, deviceUIDs: deviceUIDs)
-            try tap.activate(initialDSP: initialDSP)
+            let initial = initialDSPConfiguration(for: tap, deviceUIDs: deviceUIDs)
             taps[app.id] = tap
-            // Retry an unavailable profile asynchronously after publication.
-            if initialDSP.autoEQProfile == nil { applyAutoEQToTap(tap) }
-
-            logger.debug("Created tap for \(app.name) on \(deviceUIDs.count) device(s)")
+            tap.beginActivation(initialDSP: initial) { [weak self, tap] result in
+                guard let self else { tap.invalidate(); return }
+                guard self.creationTokens[app.id] == token else { tap.invalidate(); return }
+                let stillOwned = self.taps[app.id] === tap
+                self.creationTokens.removeValue(forKey: app.id)
+                self.pidsBeingCreated.remove(app.id)
+                guard stillOwned else { tap.invalidate(); return }
+                switch result {
+                case .success:
+                    guard !self.settingsManager.isIgnored(app.persistenceIdentifier) else {
+                        self.taps.removeValue(forKey: app.id); tap.invalidate(); return
+                    }
+                    self.applyTapOutputState(to: tap, for: app.id, deviceUIDs: tap.currentDeviceUIDs)
+                    self.appliedPIDs.insert(app.id)
+                    self.applyAutoEQToTap(tap)
+                    self.logger.debug("Created tap for \(app.name)")
+                case .failure(let error):
+                    self.taps.removeValue(forKey: app.id)
+                    tap.invalidate()
+                    self.appliedPIDs.remove(app.id)
+                    self.recordTapCreationFailure()
+                    if let lifecycleError = error as? TapLifecycleError,
+                       lifecycleError == .deadline || lifecycleError == .retirementFailed { self.audioSystemHealth.reportTimeout() }
+                    self.logger.error("Tap creation failed for \(app.name): \(error.localizedDescription)")
+                }
+            }
         } catch {
+            creationTokens.removeValue(forKey: app.id); pidsBeingCreated.remove(app.id)
             recordTapCreationFailure()
-            logger.error("Failed to create tap for \(app.name): \(error.localizedDescription)")
+            logger.error("Tap factory failed for \(app.name): \(error.localizedDescription)")
         }
     }
     func ensureTapExists(for app: AudioApp, deviceUID: String) {
-        guard captureRebuildTask == nil else { return }
-        guard taps[app.id] == nil else { return }
-        guard !pidsBeingRecreated.contains(app.id) else { return }  // recreation in flight
-        guard !pidsBeingCreated.contains(app.id) else { return }  // creation in flight (nested run loop re-entry)
-        guard permission.status == .authorized else { return }
-
-        // Same nested-run-loop guard as ensureTapWithDevices: activate() can
-        // re-enter tap creation for this pid before the tap lands in `taps`.
-        pidsBeingCreated.insert(app.id)
-        defer { pidsBeingCreated.remove(app.id) }
-
-        let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: [deviceUID], isFollowsDefault: followsDefault.contains(app.id))
-        do {
-            let tap = try tapFactory(app, [deviceUID], preferredTapSourceUID)
-            applyTapOutputState(to: tap, for: app.id, deviceUIDs: [deviceUID])
-
-            let initialDSP = initialDSPConfiguration(for: tap, deviceUIDs: [deviceUID])
-            try tap.activate(initialDSP: initialDSP)
-            taps[app.id] = tap
-            // Retry an unavailable profile asynchronously after publication.
-            if initialDSP.autoEQProfile == nil { applyAutoEQToTap(tap) }
-
-            logger.debug("Created tap for \(app.name)")
-            DiagnosticLog.log("tap: created for \(app.name)#\(app.id) on \(deviceUID)")
-        } catch {
-            recordTapCreationFailure()
-            logger.error("Failed to create tap for \(app.name): \(error.localizedDescription)")
-            DiagnosticLog.log("tap: CREATE FAILED for \(app.name)#\(app.id) on \(deviceUID): \(error.localizedDescription)")
+        ensureTapWithDevices(for: app, deviceUIDs: [deviceUID])
+    }
+    func cancelPendingCreation(for pid: pid_t) {
+        let wasCreating = creationTokens.removeValue(forKey: pid) != nil
+        let wasActivatingRecovery = pidsBeingRecreated.contains(pid) && taps[pid] != nil
+        guard wasCreating || wasActivatingRecovery else { return }
+        if wasActivatingRecovery {
+            tapRecreationTokens.removeValue(forKey: pid)
+            pidsBeingRecreated.remove(pid)
         }
+        pidsBeingCreated.remove(pid)
+        if let tap = taps.removeValue(forKey: pid) { tap.invalidate() }
+        appliedPIDs.remove(pid)
     }
 
     /// Restores the default to `lastConfirmedDefaultUID` (what the user/FineTune intended).
@@ -394,10 +395,19 @@ extension AudioEngine {
         let previouslyFollowedDefault = followsDefault.contains(pid)
         recordTapRecoveryAttempt(pid: pid)
         DiagnosticLog.log("recreate: pid=\(pid) app=\(oldTap.app.name) devices=\(previousDeviceUIDs) — tearing down old tap")
-        let teardown = Task { await oldTap.invalidateAsync() }
+        let teardown = Task { @MainActor in
+            do { try await oldTap.invalidateAndWait(); return true }
+            catch { return false }
+        }
         pendingTapTeardowns[recreationToken] = teardown
         defer { pendingTapTeardowns.removeValue(forKey: recreationToken) }
-        await teardown.value
+        let retired = await teardown.value
+        guard retired else {
+            if !Task.isCancelled { audioSystemHealth.reportTimeout() }
+            recordTapRecoveryResult(pid: pid, succeeded: false)
+            tapRecoveryCooldownUntil[pid] = Date().addingTimeInterval(12)
+            return
+        }
 
         // stop/reset can run during teardown. Never resurrect a discarded tap
         // or overwrite a replacement owned by a newer recovery.
@@ -455,10 +465,17 @@ extension AudioEngine {
             let tap = try tapFactory(app, deviceUIDs, preferredTapSourceUID)
             applyTapOutputState(to: tap, for: app.id, deviceUIDs: deviceUIDs)
             let initialDSP = initialDSPConfiguration(for: tap, deviceUIDs: deviceUIDs)
-            try tap.activate(initialDSP: initialDSP)
-            // activate() pumps the run loop while waiting for HAL readiness,
+            taps[pid] = tap
+            do { try await tap.activateAwaiting(initialDSP: initialDSP) }
+            catch {
+                if taps[pid] === tap { taps.removeValue(forKey: pid) }
+                tap.invalidate()
+                throw error
+            }
+            // Activation suspends the run loop while waiting for HAL readiness,
             // so lifecycle invalidation can also happen before publication.
-            guard tapRecreationTokens[pid] == recreationToken, !Task.isCancelled, taps[pid] == nil else {
+            guard tapRecreationTokens[pid] == recreationToken, !Task.isCancelled, taps[pid] === tap else {
+                if taps[pid] === tap { taps.removeValue(forKey: pid) }
                 tap.invalidate()
                 return
             }

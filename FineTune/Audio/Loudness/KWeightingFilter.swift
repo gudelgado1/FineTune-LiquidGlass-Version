@@ -8,7 +8,7 @@ import Foundation
 ///
 /// Implemented as transposed direct-form II with scalar state fields for RT-safety.
 /// No allocations occur in `processSample`.
-final class KWeightingFilter: @unchecked Sendable {
+nonisolated final class KWeightingFilter: @unchecked Sendable {
 
     // MARK: - Coefficient storage (Double precision for accuracy)
 

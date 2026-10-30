@@ -366,6 +366,7 @@ extension AudioEngine {
         taps.removeAll()
         appliedPIDs.removeAll()
         pidsBeingCreated.removeAll()
+        creationTokens.removeAll()
         pidsBeingRecreated.removeAll()
         tapRecreationTokens.removeAll()
         tapRecoveryCooldownUntil.removeAll()
@@ -403,14 +404,23 @@ extension AudioEngine {
             discardAllTaps(invalidate: false)
             // Keep every creation path gated until actual HAL teardown finishes.
             // A fixed delay did not stop the health loop from recreating early.
-            for tap in retired { await tap.invalidateAsync() }
-            for teardown in alreadyRetiring { await teardown.value }
+            for tap in retired {
+                do { try await tap.invalidateAndWait() }
+                catch { if !Task.isCancelled { audioSystemHealth.reportTimeout() }; return nil }
+            }
+            for teardown in alreadyRetiring {
+                guard await teardown.value else { audioSystemHealth.reportTimeout(); return nil }
+            }
             guard !Task.isCancelled else { return nil }
             processMonitor.refreshNow()
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled, audioSystemHealth.allowsPeriodicHALWork else { return nil }
             captureRebuildTask = nil
             applyPersistedSettings()
+            while !pidsBeingCreated.isEmpty {
+                guard !Task.isCancelled else { return nil }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
             DiagnosticLog.log("capture: manual rebuild complete — \(taps.count) tap(s)")
             return taps.count
         }

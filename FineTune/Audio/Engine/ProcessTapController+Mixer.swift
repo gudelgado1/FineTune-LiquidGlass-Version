@@ -27,7 +27,7 @@ extension ProcessTapController {
     ///   The caller (audio callback) writes this back to its role-specific
     ///   state var so the ramp persists across callbacks.
     @inline(__always)
-    static func processMappedBuffers(
+    nonisolated static func processMappedBuffers(
         inputBuffers: UnsafeMutableAudioBufferListPointer,
         outputBuffers: UnsafeMutableAudioBufferListPointer,
         targetVol: Float,

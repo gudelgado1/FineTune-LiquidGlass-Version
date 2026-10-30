@@ -38,7 +38,7 @@ def resolve_paths(value, *, products, original_host):
     return value
 
 
-def isolate_unit_tests(manifest, run_dir, developer, env):
+def isolate_unit_tests(manifest, run_dir, developer, env, sanitizer=None):
     products = manifest.parent
     with manifest.open('rb') as stream:
         data = plistlib.load(stream)
@@ -84,6 +84,11 @@ def isolate_unit_tests(manifest, run_dir, developer, env):
         'DYLD_FRAMEWORK_PATH': ':'.join(map(str, [build_products, build_products / 'PackageFrameworks',
                                                app_contents / 'Frameworks', platform / 'Library/Frameworks']))
     }
+    if sanitizer:
+        resource = subprocess.check_output(['/usr/bin/xcrun', 'clang', '--print-resource-dir'], env=env, text=True).strip()
+        runtime = Path(resource) / 'lib/darwin' / f'libclang_rt.{"tsan" if sanitizer == "thread" else "asan"}_osx_dynamic.dylib'
+        if not runtime.is_file(): raise SystemExit(f'Missing sanitizer runtime: {runtime}')
+        target['TestingEnvironmentVariables']['DYLD_INSERT_LIBRARIES'] = str(runtime)
     config = copy.deepcopy(configuration)
     config['TestTargets'] = [target]
     data['TestConfigurations'] = [config]
@@ -103,6 +108,7 @@ def main():
     parser.add_argument('--skip-build', action='store_true', help='use the latest existing Debug test build')
     parser.add_argument('--only', action='append', default=[], metavar='TARGET/SUITE[/TEST]',
                         help='repeat to select tests; without this, every test in the chosen target runs')
+    parser.add_argument('--sanitizer', choices=['thread', 'address'])
     args = parser.parse_args()
     allowed_targets = {'unit': {'FineTuneTests'}, 'ui': {'FineTuneUITests'}, 'all': {'FineTuneTests', 'FineTuneUITests'}}[args.suite]
     for selection in args.only:
@@ -133,6 +139,7 @@ def main():
         run([xcodebuild, 'build-for-testing', '-project', str(repo / 'FineTune.xcodeproj'),
              '-scheme', 'FineTune', '-destination', destination, '-derivedDataPath', str(build_dir / 'DerivedData'),
              '-clonedSourcePackagesDirPath', str(packages), '-disableAutomaticPackageResolution',
+             *(['-enableThreadSanitizer', 'YES'] if args.sanitizer == 'thread' else ['-enableAddressSanitizer', 'YES'] if args.sanitizer == 'address' else []),
              'ENABLE_DEBUG_DYLIB=YES', 'CODE_SIGNING_ALLOWED=' + ('NO' if args.suite == 'unit' else 'YES')], env=env, log=run_dir / 'build.log')
     manifests = sorted(products.glob('FineTune_*.xctestrun'), key=lambda p: p.stat().st_mtime, reverse=True)
     if not manifests:
@@ -140,7 +147,7 @@ def main():
     manifest = manifests[0]
     suites = ['unit', 'ui'] if args.suite == 'all' else [args.suite]
     for suite in suites:
-        selected_manifest = isolate_unit_tests(manifest, run_dir, developer, env) if suite == 'unit' else manifest
+        selected_manifest = isolate_unit_tests(manifest, run_dir, developer, env, args.sanitizer) if suite == 'unit' else manifest
         target = 'FineTuneTests' if suite == 'unit' else 'FineTuneUITests'
         selections = [item for item in args.only if item.split('/')[0] == target]
         if args.only and not selections:

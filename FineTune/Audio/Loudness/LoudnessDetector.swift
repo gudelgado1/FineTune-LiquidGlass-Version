@@ -6,7 +6,7 @@ import Foundation
 /// Thread-safety: all mutation must occur on a single real-time audio thread.
 /// The class is marked @unchecked Sendable because its mutable state is
 /// exclusively owned by that thread.
-final class LoudnessDetector: @unchecked Sendable {
+nonisolated final class LoudnessDetector: @unchecked Sendable {
 
     // MARK: - Private state
 

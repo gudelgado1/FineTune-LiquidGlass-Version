@@ -10,10 +10,11 @@ nonisolated struct TapRenderClock: Equatable, Sendable {
 
 /// Abstraction over process tap controllers for testability.
 ///
-/// **Threading:** Intentionally NOT `@MainActor`. Concrete implementations straddle
-/// the main thread (property access from AudioEngine) and the CoreAudio HAL I/O thread
-/// (audio processing callbacks). Concrete implementations must synchronize shared
-/// state; `nonisolated(unsafe)` alone does not provide atomic access or ownership.
+/// Control-side interface. Native callbacks capture a nonisolated per-IO-proc
+/// TapRenderContext and never read controller state. Legacy synchronous activate
+/// methods remain as an adapter seam for tests; native activation is asynchronous.
+
+@MainActor
 protocol ProcessTapControlling: AnyObject {
     var app: AudioApp { get }
     var volume: Float { get set }
@@ -25,6 +26,9 @@ protocol ProcessTapControlling: AnyObject {
     var currentDeviceUIDs: [String] { get }
     var renderClock: TapRenderClock? { get }
 
+    func beginActivation(initialDSP: TapDSPConfiguration, completion: @escaping @MainActor (Result<Void, Error>) -> Void)
+    func activateAwaiting(initialDSP: TapDSPConfiguration) async throws
+    func invalidateAndWait() async throws
     func activate() throws
     func activate(initialDSP: TapDSPConfiguration) throws
     func invalidate()
@@ -56,6 +60,14 @@ protocol ProcessTapControlling: AnyObject {
 }
 
 extension ProcessTapControlling {
+    func beginActivation(initialDSP: TapDSPConfiguration, completion: @escaping @MainActor (Result<Void, Error>) -> Void) {
+        completion(Result { try activate(initialDSP: initialDSP) })
+    }
+    func activateAwaiting(initialDSP: TapDSPConfiguration) async throws {
+        try await withCheckedThrowingContinuation { continuation in beginActivation(initialDSP: initialDSP) { continuation.resume(with: $0) } }
+    }
+    func invalidateAndWait() async throws { await invalidateAsync() }
+
     /// Compatibility path for adapters/mocks. Native taps build processors from
     /// this state before registering/starting their IO proc.
     func activate(initialDSP: TapDSPConfiguration) throws {

@@ -497,15 +497,12 @@ extension AudioEngine {
         guard let watcher = aliveWatchers.removeValue(forKey: deviceID) else { return }
         watcher.timeout.cancel()
 
-        var address = AudioObjectPropertyAddress(
+        let address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsAlive,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let status = AudioObjectRemovePropertyListenerBlock(deviceID, &address, .main, watcher.block)
-        if status != noErr && status != OSStatus(kAudioHardwareBadObjectError) {
-            logger.warning("Failed to remove alive watcher for device \(deviceID): \(status)")
-        }
+        HALListenerRetirement.remove(deviceID, address: address, block: watcher.block)
     }
 
     /// Removes a one-shot alive watcher by device UID. Used during disconnect when the

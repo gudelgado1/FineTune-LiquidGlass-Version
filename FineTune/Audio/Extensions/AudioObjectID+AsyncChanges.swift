@@ -62,10 +62,7 @@ extension AudioObjectID {
             continuation.onTermination = { _ in
                 // Use a fresh local var — Core Audio mutates `&address` internally
                 // and we don't want to share state with the listener registration.
-                var removeAddress = address
-                AudioObjectRemovePropertyListenerBlock(
-                    objectID, &removeAddress, queue, listener
-                )
+                HALListenerRetirement.remove(objectID, address: address, queue: queue, block: listener)
             }
         }
     }

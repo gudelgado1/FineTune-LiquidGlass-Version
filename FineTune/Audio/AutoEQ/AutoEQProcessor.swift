@@ -7,7 +7,7 @@ import Accelerate
 /// Subclass of `BiquadProcessor` — inherits delay buffer management, atomic setup swaps,
 /// stereo biquad processing, and NaN safety. This class adds AutoEQ-specific profile
 /// management and a preamp gain stage applied before the biquad cascade.
-final class AutoEQProcessor: BiquadProcessor, @unchecked Sendable {
+nonisolated final class AutoEQProcessor: BiquadProcessor, @unchecked Sendable {
 
     /// Currently applied profile (needed for sample rate recalculation)
     private var _currentProfile: AutoEQProfile?

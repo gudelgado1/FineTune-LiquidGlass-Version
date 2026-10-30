@@ -69,16 +69,12 @@ final class AudioEngine {
     @ObservationIgnored var pidsBeingRecreated: Set<pid_t> = []
     /// Ownership of each asynchronous recreation; reset/stop invalidates old work.
     @ObservationIgnored var tapRecreationTokens: [pid_t: UUID] = [:]
-    /// PIDs whose *initial* tap creation is in flight. `activate()` blocks the
-    /// main thread in `waitUntilReady`, which pumps a nested run loop to process
-    /// HAL events — and a nested run loop also drains the main queue, so a
-    /// health-monitor tick or `onAppsChanged` callback can re-enter
-    /// `applyPersistedSettings` → `ensureTap*` for the SAME pid before the first
-    /// tap lands in `taps`. Without this guard that created a duplicate tap whose
-    /// aggregate device leaked. Mirror of `pidsBeingRecreated` for creation.
+    /// Async capture placeholders remain visible while creation is pending.
+    /// Tokens reject completion after stop, ignore, reset or replacement.
     @ObservationIgnored var pidsBeingCreated: Set<pid_t> = []
+    @ObservationIgnored var creationTokens: [pid_t: UUID] = [:]
     @ObservationIgnored var captureRebuildTask: Task<Int?, Never>?
-    @ObservationIgnored var pendingTapTeardowns: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored var pendingTapTeardowns: [UUID: Task<Bool, Never>] = [:]
     /// Reads the HAL's registered audio process objects. Injectable for tests.
     /// Used to distinguish a *paused* app (process objects still registered)
     /// from a *quit* app in warm-tap retention and post-wake recovery.
@@ -469,6 +465,8 @@ final class AudioEngine {
         stopHealthMonitor()
         stopResilienceObservers()
         tapRecreationTokens.removeAll()
+        creationTokens.removeAll()
+        pidsBeingCreated.removeAll()
         pidsBeingRecreated.removeAll()
         audioSystemHealth.stop()
         processMonitor.stop()
@@ -811,6 +809,7 @@ final class AudioEngine {
         }
 
         // Switch tap if needed
+        cancelPendingCreation(for: app.id)
         guard let targetUID = appDeviceRouting[app.id] else { return }
         let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: [targetUID], isFollowsDefault: followsDefault.contains(app.id))
         if let tap = taps[app.id] {

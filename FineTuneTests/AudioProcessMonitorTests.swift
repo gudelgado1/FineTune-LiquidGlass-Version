@@ -377,6 +377,10 @@ struct AudioProcessMonitorTests {
         releaseAdd.signal()
         let status = await install.value
 
+        for _ in 0..<200 {
+            if removals.withLock({ $0 }) == 1 { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
         #expect(status == noErr)
         #expect(!registered.withLock { $0 })
         #expect(removals.withLock { $0 } == 1)

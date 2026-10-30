@@ -3,7 +3,7 @@ import Accelerate
 import Atomics
 import os
 
-private final class BiquadSetupOwner {
+nonisolated private final class BiquadSetupOwner {
     let setup: vDSP_biquad_Setup
     init(_ setup: vDSP_biquad_Setup) { self.setup = setup }
     deinit { vDSP_biquad_DestroySetup(setup) }
@@ -12,7 +12,7 @@ private final class BiquadSetupOwner {
 /// Control publishes immutable scalar parameters and a pinned C setup. Only the
 /// single render reader touches delay buffers. Primary and secondary callbacks
 /// use separate processor instances. Reclamation runs on control, never render.
-class BiquadProcessor: @unchecked Sendable, BiquadProcessable {
+nonisolated class BiquadProcessor: @unchecked Sendable, BiquadProcessable {
     private struct Parameters {
         var setup: vDSP_biquad_Setup?
         var enabled: Bool

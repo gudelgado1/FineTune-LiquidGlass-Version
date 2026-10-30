@@ -42,11 +42,10 @@ really returns. Saturation fails closed; a daemon that permanently strands all
 slots can require restarting FineTune. The liveness sweep waits asynchronously
 and revalidates tap identity, route and render clock before acting on a result.
 
-These checks do not certify the entire audio pipeline. `ProcessTapController`
-still has shared scalar/reference fields, crossfade transitions, and timed
-retirement of some processor objects outside BiquadProcessor. Other paths still
-make synchronous HAL calls. Hardware QA must cover playback, mute, device changes,
-sleep/wake, multi-output, long sessions and pressure before a release.
+The native capture controller now owns per-IO-proc render contexts and an async
+HAL lifecycle. The small SwiftPM harness checks DSP primitives; use the native
+host's --sanitizer thread/address checks for controller/lifecycle integration.
+Neither replaces physical playback or full UI testing.
 
 Crossfade checks now run in the same sanitizer harness. `CrossfadeState` publishes
 phase, progress and saturated counters in one atomic double-word; a phase change
@@ -67,5 +66,5 @@ destructive fallback; timeouts no longer manufacture progress=1. The independent
 AutoEQ copy preserves the primary's preamp mode at the new device rate.
 
 Use `--filter SuiteName` with run-dsp-checks.py for a focused regression run.
-The full pipeline/reference lifetime and HAL migration remain described in
+The capture ownership and completed HAL lifecycle migration are described in
 [qa-hal-lifecycle.md](qa-hal-lifecycle.md).

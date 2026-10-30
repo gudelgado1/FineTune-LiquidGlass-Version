@@ -21,13 +21,15 @@ nonisolated final class RealtimeSnapshot<Value>: @unchecked Sendable {
         deinit { pointer.deinitialize(count: 1); pointer.deallocate() }
     }
 
+    private let keepLastReadAlive: Bool
     private let published: ManagedAtomic<UnsafeMutableRawPointer?>
     private let hazard = ManagedAtomic<UnsafeMutableRawPointer?>(nil)
     // Control-writer-only state. Never read from the render thread.
     private var current: Storage
     private var retired: [Storage] = []
 
-    init(_ value: Value, owner: AnyObject? = nil) {
+    init(_ value: Value, owner: AnyObject? = nil, keepLastReadAlive: Bool = false) {
+        self.keepLastReadAlive = keepLastReadAlive
         let storage = Storage(value, owner: owner)
         current = storage
         published = ManagedAtomic(UnsafeMutableRawPointer(storage.pointer))
@@ -57,7 +59,10 @@ nonisolated final class RealtimeSnapshot<Value>: @unchecked Sendable {
             let candidate = published.load(ordering: .sequentiallyConsistent)!
             hazard.store(candidate, ordering: .sequentiallyConsistent)
             guard published.load(ordering: .sequentiallyConsistent) == candidate else { continue }
-            defer { hazard.store(nil, ordering: .sequentiallyConsistent) }
+            // A Swift-object reader may retain a temporary beyond the body.
+            // In that mode keep the last snapshot pinned until the NEXT read
+            // (the next IO callback), or until context destruction after HAL ack.
+            defer { if !keepLastReadAlive { hazard.store(nil, ordering: .sequentiallyConsistent) } }
             return body(candidate.assumingMemoryBound(to: Value.self).pointee)
         }
     }

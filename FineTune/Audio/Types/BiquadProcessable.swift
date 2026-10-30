@@ -10,7 +10,7 @@
 /// ## RT-Safety Contract
 /// `process()` and `isEnabled` MUST be safe to call on CoreAudio's
 /// HAL I/O thread: no allocations, locks, ObjC, logging, or I/O.
-protocol BiquadProcessable: AnyObject {
+nonisolated protocol BiquadProcessable: AnyObject {
     /// Whether processing is currently active (RT-safe atomic read).
     var isEnabled: Bool { get }
 

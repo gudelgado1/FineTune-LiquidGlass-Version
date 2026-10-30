@@ -1,1490 +1,280 @@
-// FineTune/Audio/Engine/ProcessTapController.swift
-import Accelerate    // vDSP for SIMD peak detection
 import AudioToolbox
-import Atomics
 import Foundation
 import os
 
-// MARK: - Threading Model
-//
-// ProcessTapController bridges two execution domains:
-//
-// 1. **Main thread / @MainActor**: All setup, teardown, and state management.
-//    - activate(), invalidate(), updateDevices(), performCrossfadeSwitch()
-//    - Property writes to nonisolated(unsafe) vars (_volume, _isMuted, etc.)
-//    - This class is NOT @MainActor itself because the HAL I/O callback is not on main.
-//
-// 2. **HAL I/O thread (real-time)**: Audio processing callback.
-//    - processAudioCallback() — unified callback with runtime role via callbackID
-//    - Reads nonisolated(unsafe) vars; writes _peakLevel/_secondaryPeakLevel,
-//      _primaryCurrentVolume/_secondaryCurrentVolume, _lastRenderHostTime, _hasRenderedAudio
-//    - MUST NOT allocate, lock, log, or call ObjC (real-time safety).
-//
-// Crossfade state and callback role IDs use explicit atomics. Remaining unsafe
-// fields below still need synchronization/lifetime review; alignment and
-// nonisolated(unsafe) do not establish Swift memory-model safety.
-
+/// MainActor owns route intent and HAL leases. An IO proc captures only its own
+/// TapRenderContext; no callback reads controller fields or adopts another proc's history.
+@MainActor
 final class ProcessTapController: ProcessTapControlling {
     let app: AudioApp
-    private let logger: Logger
-    // Note: This queue is passed to AudioDeviceCreateIOProcIDWithBlock but the actual
-    // audio callback runs on CoreAudio's real-time HAL I/O thread, not this queue.
-    private let queue = DispatchQueue(label: "ProcessTapController", qos: .userInitiated)
-
-    /// Weak reference to device monitor for O(1) device lookups during crossfade
-    private weak var deviceMonitor: AudioDeviceMonitor?
-    /// Optional device UID to use for stream-specific tap capture.
-    /// When nil, tap creation always uses stereo mixdown capture.
-    private var preferredTapSourceDeviceUID: String?
-
-    /// Exposes the current tap source device UID for diagnostics and tap source refresh logic.
-    /// Non-nil means stream-specific tap; nil means stereo mixdown.
-    var tapSourceDeviceUID: String? { preferredTapSourceDeviceUID }
-
-    // MARK: - RT-Safe State (nonisolated(unsafe) for lock-free audio thread access)
-    //
-    // These variables are accessed from CoreAudio's real-time thread without locks.
-    // Some legacy scalar/reference exchanges remain unsynchronized. They are
-    // deliberately listed here for the remaining callback ownership migration.
-
-    /// Target gain set by AudioEngine (volume × boost). Range 0.0-4.0 (1.0 = unity, 4.0 = +12dB).
-    private nonisolated(unsafe) var _volume: Float = 1.0
-    /// Current ramped volume for primary tap (smoothly approaches _volume)
-    private nonisolated(unsafe) var _primaryCurrentVolume: Float = 1.0
-    /// Current ramped volume for secondary tap during crossfade
-    private nonisolated(unsafe) var _secondaryCurrentVolume: Float = 1.0
-    /// Emergency silence flag - zeroes output immediately (used during destructive device switch)
-    /// Unlike _isMuted, this bypasses all processing including VU metering
-    private nonisolated(unsafe) var _forceSilence: Bool = false
-    /// User-controlled mute - still tracks VU levels but outputs silence
-    private nonisolated(unsafe) var _isMuted: Bool = false
-    // Device volume compensation removed — was dead code (always 1.0).
-    // If implementing, ensure both primary and secondary callbacks disable
-    // compensation during crossfade to avoid gain jumps (RT-013).
-    /// Smoothed peak level for VU meter display (exponential moving average)
-    private nonisolated(unsafe) var _peakLevel: Float = 0.0
-    /// Separate peak level for secondary tap during crossfade (avoids torn RMW from concurrent callbacks)
-    private nonisolated(unsafe) var _secondaryPeakLevel: Float = 0.0
-    private nonisolated(unsafe) var _currentDeviceVolume: Float = 1.0
-    private nonisolated(unsafe) var _isDeviceMuted: Bool = false
-    private nonisolated(unsafe) var _primaryPreferredStereoLeftChannel: Int = 0
-    private nonisolated(unsafe) var _primaryPreferredStereoRightChannel: Int = 1
-    private nonisolated(unsafe) var _secondaryPreferredStereoLeftChannel: Int = 0
-    private nonisolated(unsafe) var _secondaryPreferredStereoRightChannel: Int = 1
-    /// Monotonic host tick of the last audio callback execution.
-    private nonisolated(unsafe) var _lastRenderHostTime: UInt64 = 0
-    private nonisolated(unsafe) var renderLongGaps: Int64 = 0
-    private nonisolated(unsafe) var renderCallbackCount: Int64 = 0
-    private nonisolated(unsafe) var primaryRenderSampleRate: Double = 48000
-
-    // OSAtomic supports the app's macOS 14 deployment target. Atomic counters
-    // keep control-thread reads independent of the render-thread timing state.
-    var renderDiagnostics: TapRenderDiagnostics {
-        TapRenderDiagnostics(
-            callbackCount: UInt64(bitPattern: OSAtomicAdd64Barrier(0, &renderCallbackCount)),
-            longGapCount: UInt64(bitPattern: OSAtomicAdd64Barrier(0, &renderLongGaps))
-        )
-    }
-    /// Monotonic host tick of successful activation.
-    private nonisolated(unsafe) var _activationHostTime: UInt64 = 0
-    /// Set once any audio callback has rendered at least one buffer.
-    private nonisolated(unsafe) var _hasRenderedAudio: Bool = false
-
-    /// When true, the audio callback skips the EQ / AutoEQ / loudness DSP stage
-    /// to shed CPU under memory/CPU pressure (set via `setDSPBypass`). The gain
-    /// ramp, channel mapping, mute, and metering still run — only the optional
-    /// effects are dropped, so audio keeps flowing (just unprocessed) while the
-    /// system is thrashing instead of risking an IO-thread overload/dropout.
-    private nonisolated(unsafe) var _dspBypass: Bool = false
-
-    /// Callback role identification — RT-safe via atomic UInt32 reads.
-    /// Each IO proc closure captures an immutable callbackID at creation.
-    /// The callback compares against these to determine primary/secondary role.
-    /// After promotion, _primaryCallbackID is reassigned so the promoted callback
-    /// seamlessly switches to primary-role behavior on its next invocation.
-    private let callbackIDs = ManagedAtomic<UInt64>(0)
-    private var _primaryCallbackID: UInt32 {
-        get { UInt32(truncatingIfNeeded: callbackIDs.load(ordering: .acquiring)) }
-        set { setCallbackID(newValue, secondary: false) }
-    }
-    private var _secondaryCallbackID: UInt32 {
-        get { UInt32(truncatingIfNeeded: callbackIDs.load(ordering: .acquiring) >> 32) }
-        set { setCallbackID(newValue, secondary: true) }
-    }
-    private func setCallbackID(_ value: UInt32, secondary: Bool) {
-        var old = callbackIDs.load(ordering: .acquiring)
-        while true {
-            let next = secondary ? (old & 0xffff_ffff) | UInt64(value) << 32
-                : (old & 0xffff_ffff_0000_0000) | UInt64(value)
-            let result = callbackIDs.compareExchange(expected: old, desired: next, ordering: .acquiringAndReleasing)
-            if result.exchanged { return }
-            old = result.original
-        }
-    }
-    /// Monotonic counter for unique callback IDs. Only written from main thread.
-    private var nextCallbackID: UInt32 = 0
-
-    /// Crossfade state machine (RT-safe).
-    /// During device switch, we run two taps simultaneously with complementary gain curves:
-    /// - Primary uses cos(progress * π/2) → fades from 1.0 to 0.0
-    /// - Secondary uses sin(progress * π/2) → fades from 0.0 to 1.0
-    /// This "equal power" crossfade maintains perceived loudness throughout the transition.
-    /// See CrossfadeState for phase machine details.
-    private let crossfadeState = CrossfadeState()
-
-    // MARK: - Non-RT State (modified only from main thread)
-
-    /// VU meter smoothing factor. 0.3 gives ~30ms attack/decay at typical 30fps UI refresh.
-    /// Lower = smoother but slower response; higher = jittery but more responsive.
-    private let levelSmoothingFactor: Float = 0.3
-
-    /// Volume ramp time in seconds. 30ms is fast enough to feel responsive yet
-    /// slow enough to avoid audible clicks when volume changes abruptly.
-    /// Centralized so all three computation sites (primary activate, secondary
-    /// tap creation, promotion) share the same target.
-    private static let rampTimeSeconds: Float = 0.030
-
-    /// Default 48 kHz value of `rampCoefficient` used until the actual device
-    /// sample rate is read in `activate()`. Documented separately so the magic
-    /// number doesn't look arbitrary.
-    /// `Self.` cannot be referenced from a stored property initializer in
-    /// Swift, so we use the explicit type name here.
-    private static let defaultRampCoefficient: Float = 1 - exp(-1 / (48000 * ProcessTapController.rampTimeSeconds))
-
-    /// Computes the exponential ramp coefficient for a given sample rate.
-    /// Formula: `1 - exp(-1 / (sampleRate × rampTimeSeconds))`. The signal
-    /// reaches ~63% of target in `rampTimeSeconds`. Higher sample rates need
-    /// smaller coefficients to maintain the same wall-clock ramp duration.
-    @inline(__always)
-    private static func rampCoefficient(forSampleRate sampleRate: Double) -> Float {
-        1 - exp(-1 / (Float(sampleRate) * ProcessTapController.rampTimeSeconds))
-    }
-
-    /// Volume ramp coefficient for the primary tap. Recomputed on activate() and
-    /// crossfade promotion to match the active device's actual sample rate.
-    private nonisolated(unsafe) var rampCoefficient: Float = ProcessTapController.defaultRampCoefficient
-    private nonisolated(unsafe) var secondaryRampCoefficient: Float = ProcessTapController.defaultRampCoefficient
-    private nonisolated(unsafe) var eqProcessor: EQProcessor?
-    private nonisolated(unsafe) var autoEQProcessor: AutoEQProcessor?
-    private nonisolated(unsafe) var loudnessCompensator: LoudnessCompensator?
-    private nonisolated(unsafe) var loudnessEqualizerProcessor: LoudnessEqualizer?
-    /// Last effective loudness volume (device × app) passed to updateLoudnessCompensation.
-    /// Used by createSecondaryTap to initialize secondary compensator with the correct volume.
-    private var _lastLoudnessVolume: Float = 1.0
-    /// Independent EQ processors for secondary tap during crossfade.
-    /// Each tap needs its own biquad delay buffers — sharing would corrupt filter state
-    /// because both callbacks write concurrently from different HAL I/O threads.
-    private nonisolated(unsafe) var secondaryEQProcessor: EQProcessor?
-    private nonisolated(unsafe) var secondaryAutoEQProcessor: AutoEQProcessor?
-    private nonisolated(unsafe) var secondaryLoudnessCompensator: LoudnessCompensator?
-    private nonisolated(unsafe) var secondaryLoudnessEqualizerProcessor: LoudnessEqualizer?
-
-    // Target device UIDs for synchronized multi-output (first is clock source)
-    private var targetDeviceUIDs: [String]
-    // Current active device UIDs
-    private(set) var currentDeviceUIDs: [String] = []
-
-    /// Primary device UID (clock source, first in array) - for backward compatibility
-    var currentDeviceUID: String? { currentDeviceUIDs.first }
-
-    // Core Audio resources (primary tap) — TapResources enforces correct teardown order
-    private var primaryResources = TapResources()
+    private let adapter: any TapHALAdapting
+    private let executor: OwnedHALExecutor
+    private let retirements: HALRetirementQueue
+    private let timeout: TimeInterval
+    private let transition = DeviceTransitionCoordinator()
+    private let crossfade = CrossfadeState()
+    private var activation: Task<Void, Never>?
+    private var generation: UInt64 = 0
+    private var nextID: UInt32 = 0
     private var activated = false
+    private var switching = false
+    private var activationTick: UInt64 = 0
+    private var dsp = TapDSPConfiguration()
+    private var targetDeviceUIDs: [String]
+    private var preferredSource: String?
+    private(set) var currentDeviceUIDs: [String]
+    private var tickets: [HALRetirementTicket] = []
+    private var primary: LiveTap?
+    private var secondary: LiveTap?
+    private var pending: TapRenderContext?
+    // Test callback seam has no HAL resources, but uses the same production context.
+    private var testContext: TapRenderContext?
+    nonisolated private final class LiveTap: Sendable {
+        let resource: PreparedTap
+        let context: TapRenderContext
+        private let adapter: any TapHALAdapting
+        private let queue: HALRetirementQueue
+        init(resource: PreparedTap, context: TapRenderContext, adapter: any TapHALAdapting, queue: HALRetirementQueue) {
+            self.resource = resource; self.context = context; self.adapter = adapter; self.queue = queue
+        }
+        deinit {
+            context.setRole(.retired)
+            resource.retire(adapter: adapter, queue: queue)
+        }
+    }
+    private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "ProcessTapController")
 
-    /// Clock used to initialize the active DSP. The wake worker compares this
-    /// snapshot with HAL without reading this controller from a background queue.
-    private(set) var renderClock: TapRenderClock?
-
-    // Secondary tap for crossfade
-    private var secondaryResources = TapResources()
-    private var secondaryRenderClock: TapRenderClock?
-
-    /// Guard against re-entrant crossfade (ORCH-001)
-    private var isSwitching = false
-    /// Serializes crossfade, source refresh and destructive fallback cleanup.
-    private let deviceTransition = DeviceTransitionCoordinator()
-    private var didLogEQBypassForMultichannel = false
-
-    // MARK: - Public Properties
-
-    var audioLevel: Float { crossfadeState.isActive ? max(_peakLevel, _secondaryPeakLevel) : _peakLevel }
-
-    private static let hostTimeNanosScale: Double = {
-        var info = mach_timebase_info_data_t()
-        mach_timebase_info(&info)
-        guard info.denom != 0 else { return 1.0 }
-        return Double(info.numer) / Double(info.denom)
+    var renderClock: TapRenderClock? { primary.map { TapRenderClock(aggregateDeviceID: $0.resource.aggregateID, sampleRate: $0.resource.sampleRate) } }
+    var currentDeviceUID: String? { currentDeviceUIDs.first }
+    var tapSourceDeviceUID: String? { preferredSource }
+    var volume: Float = 1 { didSet { updateParameters() } }
+    var isMuted = false { didSet { updateParameters() } }
+    var currentDeviceVolume: Float = 1
+    var isDeviceMuted = false
+    var audioLevel: Float { contexts.map(\.audioLevel).max() ?? 0 }
+    var renderDiagnostics: TapRenderDiagnostics {
+        let values = contexts.map(\.diagnostics)
+        return TapRenderDiagnostics(callbackCount: values.reduce(0) { $0 &+ $1.callbackCount },
+                                    longGapCount: values.reduce(0) { $0 &+ $1.longGapCount })
+    }
+    private var contexts: [TapRenderContext] { [primary?.context, secondary?.context, pending, testContext].compactMap { $0 } }
+    private static let nanosPerTick: Double = {
+        var info = mach_timebase_info_data_t(); mach_timebase_info(&info)
+        return Double(info.numer) / Double(max(1, info.denom))
     }()
-
-    /// Returns true when the audio callback has run within the requested interval.
-    func hasRecentAudioCallback(within seconds: Double) -> Bool {
-        let last = _lastRenderHostTime
-        guard last != 0 else { return false }
-        let now = mach_absolute_time()
-        let deltaNanos = Double(now &- last) * Self.hostTimeNanosScale
-        return deltaNanos <= (seconds * 1_000_000_000.0)
+    init(app: AudioApp, targetDeviceUIDs: [String], deviceMonitor: AudioDeviceMonitor? = nil,
+         preferredTapSourceDeviceUID: String? = nil,
+         adapter: (any TapHALAdapting)? = nil, executor: OwnedHALExecutor? = nil,
+         retirements: HALRetirementQueue? = nil, timeout: TimeInterval = 4) {
+        precondition(!targetDeviceUIDs.isEmpty)
+        self.app = app; self.targetDeviceUIDs = targetDeviceUIDs; self.currentDeviceUIDs = targetDeviceUIDs
+        self.preferredSource = preferredTapSourceDeviceUID
+        self.adapter = adapter ?? NativeTapHALAdapter.shared
+        self.executor = executor ?? NativeTapHALAdapter.executor
+        self.retirements = retirements ?? NativeTapHALAdapter.retirements
+        self.timeout = timeout
+    }
+    convenience init(app: AudioApp, targetDeviceUID: String, deviceMonitor: AudioDeviceMonitor? = nil,
+                     preferredTapSourceDeviceUID: String? = nil) {
+        self.init(app: app, targetDeviceUIDs: [targetDeviceUID], deviceMonitor: deviceMonitor,
+                  preferredTapSourceDeviceUID: preferredTapSourceDeviceUID)
     }
 
-    /// Health checks should only run after activation has settled and at least one callback occurred.
+    // Legacy synchronous adapter interface is only for mocks. Native lifecycle never blocks control.
+    func activate() throws { throw TapLifecycleError.asynchronousRequired }
+    func activate(initialDSP: TapDSPConfiguration) throws { throw TapLifecycleError.asynchronousRequired }
+    func beginActivation(initialDSP: TapDSPConfiguration, completion: @escaping @MainActor (Result<Void, Error>) -> Void) {
+        // Register initial configuration before yielding, so immediate UI/DSP
+        // edits to the pending placeholder cannot be overwritten by the task.
+        dsp = initialDSP
+        activation = Task { [self] in
+            do { try await activateCurrentConfiguration(); completion(.success(())) }
+            catch { completion(.failure(error)) }
+        }
+    }
+    func activateAwaiting(initialDSP: TapDSPConfiguration) async throws {
+        dsp = initialDSP
+        try await activateCurrentConfiguration()
+    }
+    private func activateCurrentConfiguration() async throws {
+        try await transition.run { [self] in
+            guard !activated else { return }
+            let epoch = generation
+            let live = try await makeLiveTap(uids: targetDeviceUIDs, role: .primary, initialVolume: nil)
+            guard epoch == generation, !Task.isCancelled else { retire(live); throw CancellationError() }
+            primary = live; pending = nil; activated = true; activationTick = mach_absolute_time()
+        }
+    }
+    func hasRecentAudioCallback(within seconds: Double) -> Bool { contexts.contains { $0.isRecent(within: seconds) } }
     func isHealthCheckEligible(minActiveSeconds: Double) -> Bool {
-        guard _hasRenderedAudio else { return false }
-        let started = _activationHostTime
-        guard started != 0 else { return false }
-        let deltaNanos = Double(mach_absolute_time() &- started) * Self.hostTimeNanosScale
-        return deltaNanos >= (minActiveSeconds * 1_000_000_000.0)
+        activationTick != 0 && contexts.contains { $0.lastRenderTick != 0 && $0.role != .retired }
+            && Double(mach_absolute_time() &- activationTick) * Self.nanosPerTick >= minActiveSeconds * 1_000_000_000
     }
-
-    /// Direct check that the server-side aggregate device still exists. Used by
-    /// the liveness watchdog to detect taps killed wholesale by a `coreaudiod`
-    /// restart (memory pressure / HAL reset), which the callback-timing checks
-    /// can't distinguish from a normally paused app.
-    ///
-    /// In-transition taps (mid device-switch, crossfade, or teardown) report
-    /// `true` so the watchdog never fights an in-progress transition — the
-    /// aggregate device ID is briefly replaced during those windows.
-    ///
-    /// Reports dead ONLY on a definitive "object gone" signal. A transient HAL
-    /// failure under load returns `.unknown`, which we treat as alive — otherwise
-    /// a healthy tap gets torn down and recreated on every load spike, cutting
-    /// audio in a ~0.5–1 s recreate loop.
     func checkResourceLiveness(timeout: TimeInterval) async -> Bool? {
-        guard activated, !isSwitching, !_invalidating else { return true }
-        let aggregateID = primaryResources.aggregateDeviceID
-        guard aggregateID.isValid else { return false }
-        // Only an immutable ID crosses to the worker. The controller and its
-        // transition state remain on control; revalidate after suspension.
-        let alive: Bool? = await HALExecutor.run(timeout: timeout) {
-            aggregateID.deviceLiveness() != .dead
-        }
-        guard activated, !isSwitching, !_invalidating,
-              primaryResources.aggregateDeviceID == aggregateID else { return true }
-        return alive
+        guard activated, !switching, let resource = primary?.resource else { return true }
+        let id = resource.aggregateID
+        return await HALExecutor.run(timeout: timeout) { id.deviceLiveness() != .dead }
     }
-
-    /// Toggles the per-callback DSP bypass (RT-safe atomic Bool write).
-    func setDSPBypass(_ bypass: Bool) {
-        _dspBypass = bypass
+    func setDSPBypass(_ bypass: Bool) { dsp.bypass = bypass; updateParameters() }
+    private func updateParameters() {
+        for context in contexts { context.update(volume: volume, muted: isMuted, bypass: dsp.bypass) }
     }
-
-    /// Reserves the identity captured by a primary IO proc before it starts.
-    /// Internal so callback tests can exercise generations without opening HAL resources.
-    func reservePrimaryCallbackID() -> UInt32 {
-        nextCallbackID += 1
-        _primaryCallbackID = nextCallbackID
-        return nextCallbackID
-    }
-
-    private func recordRenderClock(aggregateDeviceID: AudioDeviceID, sampleRate: Double) {
-        primaryRenderSampleRate = sampleRate
-        renderClock = TapRenderClock(aggregateDeviceID: aggregateDeviceID, sampleRate: sampleRate)
-        DiagnosticLog.log("render-clock: pid=\(app.id) aggregate=\(aggregateDeviceID) sampleRate=\(sampleRate)")
-    }
-
-    var currentDeviceVolume: Float {
-        get { _currentDeviceVolume }
-        set { _currentDeviceVolume = newValue }
-    }
-
-    var isDeviceMuted: Bool {
-        get { _isDeviceMuted }
-        set { _isDeviceMuted = newValue }
-    }
-
-    var volume: Float {
-        get { _volume }
-        set { _volume = newValue }
-    }
-
-    var isMuted: Bool {
-        get { _isMuted }
-        set { _isMuted = newValue }
-    }
-
-    // MARK: - Initialization
-
-    /// Initialize with multiple output devices for synchronized multi-device output.
-    /// First device in array is the clock source, others have drift compensation enabled.
-    init(
-        app: AudioApp,
-        targetDeviceUIDs: [String],
-        deviceMonitor: AudioDeviceMonitor? = nil,
-        preferredTapSourceDeviceUID: String? = nil
-    ) {
-        precondition(!targetDeviceUIDs.isEmpty, "Must have at least one target device")
-        self.app = app
-        self.targetDeviceUIDs = targetDeviceUIDs
-        self.deviceMonitor = deviceMonitor
-        self.preferredTapSourceDeviceUID = preferredTapSourceDeviceUID
-        self.logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "ProcessTapController(\(app.name))")
-    }
-
-    /// Convenience initializer for single device output.
-    convenience init(
-        app: AudioApp,
-        targetDeviceUID: String,
-        deviceMonitor: AudioDeviceMonitor? = nil,
-        preferredTapSourceDeviceUID: String? = nil
-    ) {
-        self.init(
-            app: app,
-            targetDeviceUIDs: [targetDeviceUID],
-            deviceMonitor: deviceMonitor,
-            preferredTapSourceDeviceUID: preferredTapSourceDeviceUID
-        )
-    }
-
-    // MARK: - Public Methods
-
-    func updateEQSettings(_ settings: EQSettings) {
-        eqProcessor?.updateSettings(settings)
-        secondaryEQProcessor?.updateSettings(settings)
-    }
-
-    func updateAutoEQProfile(_ profile: AutoEQProfile?) {
-        autoEQProcessor?.updateProfile(profile)
-        secondaryAutoEQProcessor?.updateProfile(profile)
-    }
-
-    func setAutoEQPreampEnabled(_ enabled: Bool) {
-        autoEQProcessor?.setPreampEnabled(enabled)
-        secondaryAutoEQProcessor?.setPreampEnabled(enabled)
-    }
-
+    func updateEQSettings(_ settings: EQSettings) { dsp.eq = settings; for context in contexts { context.eq.updateSettings(settings) } }
+    func updateAutoEQProfile(_ profile: AutoEQProfile?) { dsp.autoEQProfile = profile; for context in contexts { context.autoEQ.updateProfile(profile) } }
+    func setAutoEQPreampEnabled(_ enabled: Bool) { dsp.autoEQPreampEnabled = enabled; for context in contexts { context.autoEQ.setPreampEnabled(enabled) } }
     func updateLoudnessCompensation(volume: Float, enabled: Bool) {
-        _lastLoudnessVolume = volume
-        if enabled {
-            loudnessCompensator?.updateForVolume(volume)
-            secondaryLoudnessCompensator?.updateForVolume(volume)
-        } else {
-            loudnessCompensator?.setEnabled(false)
-            secondaryLoudnessCompensator?.setEnabled(false)
+        dsp.loudnessVolume = volume; dsp.loudnessCompensationEnabled = enabled
+        for context in contexts {
+            if enabled { context.compensator.updateForVolume(volume) } else { context.compensator.setEnabled(false) }
         }
     }
-
     func updateLoudnessEqualization(_ settings: LoudnessEqualizerSettings) {
-        // Atomic swap pattern: create new instance, swap pointer, defer-destroy old.
-        // LoudnessEqualizer is immutable after init — no runtime mutation methods.
-        // This eliminates the data race between main-thread settings changes and
-        // RT-thread process() calls.
-        if let sampleRate = try? primaryResources.aggregateDeviceID.readNominalSampleRate() {
-            let newProcessor = LoudnessEqualizer(settings: settings, sampleRate: Float(sampleRate))
-            let old = loudnessEqualizerProcessor
-            loudnessEqualizerProcessor = newProcessor
-            if let old {
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { _ = old }
-            }
-        }
-        if let secondary = secondaryLoudnessEqualizerProcessor,
-           let sampleRate = try? secondaryResources.aggregateDeviceID.readNominalSampleRate() {
-            let newSecondary = LoudnessEqualizer(settings: settings, sampleRate: Float(sampleRate))
-            secondaryLoudnessEqualizerProcessor = newSecondary
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { _ = secondary }
-        }
+        dsp.loudnessEqualization = settings
+        for context in contexts { context.updateEqualizer(settings) }
     }
 
-    // MARK: - Multi-Device Aggregate Configuration
-
-    /// Resolved plan for FineTune's private wrapping aggregate: which hardware
-    /// sub-devices to include, whether to stack them, and which is the clock.
-    struct AggregatePlan: Equatable {
-        var subDeviceUIDs: [String]
-        var isStacked: Bool
-        var clockDeviceUID: String
-    }
-
-    /// Pure planning step for `buildAggregateDescription`. Three CoreAudio
-    /// constraints drive it:
-    ///
-    ///   1. An aggregate cannot be nested inside another aggregate — the wrapper
-    ///      then reports 0 output channels. A user-created aggregate target is
-    ///      therefore *flattened* into its hardware sub-devices via `expand`.
-    ///   2. A *stacked* aggregate collapses a multichannel sub-device's output to
-    ///      one stereo pair, discarding the device's preferred (e.g. 3/4) channel
-    ///      assignment. A single flattened output stays NON-stacked so every
-    ///      channel remains addressable and the callback can place audio on the
-    ///      preferred pair.
-    ///   3. That placement only holds when the wrapper exposes exactly ONE output
-    ///      stream: preferred-channel indices are device-global, and the callback
-    ///      finds the tap as the trailing input buffer(s). A flatten yielding
-    ///      several sub-devices (or one device with several output streams) breaks
-    ///      both, so those stay stacked — which is also what makes Multi-Output
-    ///      targets mirror instead of playing out of a single sub-device.
-    ///
-    /// - Parameters:
-    ///   - outputUIDs: user-selected outputs (1 = single, >1 = mirroring).
-    ///   - expand: an aggregate's hardware sub-device UIDs, or `nil` if not an aggregate.
-    ///   - outputStreamCount: a device's output-stream count (0 when unknown).
-    static func planAggregate(
-        outputUIDs: [String],
-        expand: (String) -> [String]?,
-        outputStreamCount: (String) -> Int
-    ) -> AggregatePlan {
-        precondition(!outputUIDs.isEmpty, "Must have at least one target device")
-
-        var flatUIDs: [String] = []
-        var didFlatten = false
-        for uid in outputUIDs {
-            if let subDevices = expand(uid), !subDevices.isEmpty {
-                flatUIDs.append(contentsOf: subDevices)
-                didFlatten = true
-            } else {
-                flatUIDs.append(uid)
-            }
-        }
-
-        // De-duplicate, preserving order: one device can belong to two aggregates.
-        var seen = Set<String>()
-        flatUIDs = flatUIDs.filter { seen.insert($0).inserted }
-
-        let isMirroring = outputUIDs.count > 1
-        let isSingleFlatten = didFlatten && !isMirroring && flatUIDs.count == 1
-        let isStacked = !(isSingleFlatten && outputStreamCount(flatUIDs[0]) == 1)
-
-        return AggregatePlan(
-            subDeviceUIDs: flatUIDs,
-            isStacked: isStacked,
-            clockDeviceUID: flatUIDs[0]
-        )
-    }
-
-    /// Builds aggregate device description for synchronized multi-device output.
-    /// First device is clock source (no drift compensation), others sync to it via drift compensation.
-    private func buildAggregateDescription(outputUIDs: [String], tapUUID: UUID, name: String) -> [String: Any] {
-        precondition(!outputUIDs.isEmpty, "Must have at least one target device")
-
-        let plan = Self.planAggregate(
-            outputUIDs: outputUIDs,
-            expand: { [weak self] uid in
-                self?.audioDeviceID(for: uid)?.aggregateSubDeviceUIDs()
-            },
-            outputStreamCount: { [weak self] uid in
-                self?.audioDeviceID(for: uid)?.streamCount(scope: kAudioObjectPropertyScopeOutput) ?? 0
-            }
-        )
-
-        if plan.subDeviceUIDs != outputUIDs {
-            logger.info("Flattened output \(outputUIDs, privacy: .public) → sub-devices \(plan.subDeviceUIDs, privacy: .public) (stacked=\(plan.isStacked))")
-        }
-
-        // Build sub-device list - first device is clock source
-        var subDevices: [[String: Any]] = []
-        for (index, deviceUID) in plan.subDeviceUIDs.enumerated() {
-            subDevices.append([
-                kAudioSubDeviceUIDKey: deviceUID,
-                // First device (index 0) is clock source - no drift compensation needed
-                // All other devices have drift compensation enabled to sync to clock
-                kAudioSubDeviceDriftCompensationKey: index > 0
-            ])
-        }
-
-        return [
-            kAudioAggregateDeviceNameKey: name,
-            kAudioAggregateDeviceUIDKey: UUID().uuidString,
-            kAudioAggregateDeviceMainSubDeviceKey: plan.clockDeviceUID,
-            kAudioAggregateDeviceClockDeviceKey: plan.clockDeviceUID,
-            kAudioAggregateDeviceIsPrivateKey: true,
-            // Stacked mirrors the same audio to every sub-device (needed for
-            // multi-device output); a single flattened aggregate stays
-            // non-stacked so all of its channels stay addressable.
-            kAudioAggregateDeviceIsStackedKey: plan.isStacked,
-            kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: subDevices,
-            kAudioAggregateDeviceTapListKey: [
-                [
-                    kAudioSubTapDriftCompensationKey: true,
-                    kAudioSubTapUIDKey: tapUUID.uuidString
-                ]
-            ]
-        ]
-    }
-
-    /// Per-input-stream "is used" flags for `kAudioDevicePropertyIOProcStreamUsage`,
-    /// or `nil` when there is nothing to disable. Only the trailing `outputCount`
-    /// input streams (the process tap — the only input the callback reads) are used.
-    static func inputStreamUsageFlags(inputCount: Int, outputCount: Int) -> [UInt32]? {
-        // outputCount == 0 also covers a failed stream-count read; an all-unused
-        // map would disable the tap stream itself (the HAL then delivers NULL
-        // buffers for unused streams).
-        guard inputCount > 0, outputCount > 0 else { return nil }
-        let usedInputStreams = min(outputCount, inputCount)
-        guard inputCount > usedInputStreams else { return nil }  // nothing extra to disable
-        return (0..<inputCount).map { $0 >= inputCount - usedInputStreams ? 1 : 0 }
-    }
-
-    /// Tells the HAL this IO proc doesn't use the wrapped device's *hardware
-    /// input* streams, so they're never powered on — otherwise macOS treats a
-    /// duplex output (a USB interface, say) as microphone use and prompts for
-    /// permission. The callback only reads the trailing tap stream(s), so this
-    /// can't change the audio produced. No-op for plain output devices and the
-    /// stacked path; failure is non-fatal (audio still works, prompt may appear).
-    private func disableHardwareInputStreams(aggregateID: AudioObjectID, procID: AudioDeviceIOProcID?) {
-        guard let procID else { return }
-
-        let inputCount = aggregateID.streamCount(scope: kAudioObjectPropertyScopeInput)
-        let outputCount = aggregateID.streamCount(scope: kAudioObjectPropertyScopeOutput)
-        guard let flagsArray = Self.inputStreamUsageFlags(inputCount: inputCount, outputCount: outputCount) else { return }
-        let usedInputStreams = flagsArray.reduce(0) { $0 + Int($1) }
-
-        // AudioHardwareIOProcStreamUsage is a variable-length C struct:
-        //   { void* mIOProc; UInt32 mNumberStreams; UInt32 mStreamIsOn[mNumberStreams]; }
-        let headerSize = MemoryLayout<UnsafeMutableRawPointer>.size + MemoryLayout<UInt32>.size
-        let totalSize = headerSize + inputCount * MemoryLayout<UInt32>.size
-        let raw = UnsafeMutableRawPointer.allocate(
-            byteCount: totalSize,
-            alignment: MemoryLayout<UnsafeMutableRawPointer>.alignment
-        )
-        defer { raw.deallocate() }
-
-        raw.storeBytes(of: unsafeBitCast(procID, to: UnsafeMutableRawPointer.self), as: UnsafeMutableRawPointer.self)
-        raw.storeBytes(of: UInt32(inputCount), toByteOffset: MemoryLayout<UnsafeMutableRawPointer>.size, as: UInt32.self)
-        let flags = raw.advanced(by: headerSize)
-        for (i, isUsed) in flagsArray.enumerated() {
-            flags.advanced(by: i * MemoryLayout<UInt32>.size).storeBytes(of: isUsed, as: UInt32.self)
-        }
-
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyIOProcStreamUsage,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let err = AudioObjectSetPropertyData(aggregateID, &address, 0, nil, UInt32(totalSize), raw)
-        if err == noErr {
-            logger.info("Disabled \(inputCount - usedInputStreams) hardware input stream(s); kept \(usedInputStreams) tap stream(s)")
-        } else {
-            logger.warning("Could not disable hardware input streams (\(err)); microphone permission may be requested")
-        }
-    }
-
-    private func preferredStereoChannels(for deviceUID: String?) -> (left: Int, right: Int) {
-        guard let deviceUID, let deviceID = audioDeviceID(for: deviceUID) else {
-            return (0, 1)
-        }
-        return deviceID.preferredStereoChannelIndices()
-    }
-
-    private func outputStreamIndex(for deviceUID: String?) -> UInt? {
-        guard let deviceUID, let deviceID = audioDeviceID(for: deviceUID) else {
-            return nil
-        }
-        return try? deviceID.firstOutputStreamIndex()
-    }
-
-    private func audioDeviceID(for deviceUID: String) -> AudioDeviceID? {
-        if let monitored = deviceMonitor?.device(for: deviceUID)?.id {
-            return monitored
-        }
-
-        guard let deviceIDs = try? AudioObjectID.readDeviceList() else { return nil }
-        for id in deviceIDs {
-            if (try? id.readDeviceUID()) == deviceUID {
-                return id
-            }
-        }
-        return nil
-    }
-
-    private func maybeLogEQBypass(for tapID: AudioObjectID) {
-        guard !didLogEQBypassForMultichannel else { return }
-        guard let asbd = try? tapID.readAudioTapStreamBasicDescription() else { return }
-        guard asbd.mChannelsPerFrame != 2 else { return }
-
-        didLogEQBypassForMultichannel = true
-        logger.info("EQ processing is stereo-only and will be bypassed for tap format with \(asbd.mChannelsPerFrame) channels.")
-    }
-
-    /// Creates a process tap, preferring a device-stream tap to preserve multichannel routing.
-    /// Falls back to stereo mixdown if stream-specific tap creation fails.
-    private func createProcessTap(preferredDeviceUID: String?) throws -> (description: CATapDescription, tapID: AudioObjectID) {
-        var lastError: OSStatus = noErr
-
-        if let deviceUID = preferredDeviceUID {
-            if let outputStream = outputStreamIndex(for: deviceUID) {
-                let streamTap = CATapDescription(processes: app.processObjectIDs, deviceUID: deviceUID, stream: outputStream)
-                streamTap.uuid = UUID()
-                streamTap.muteBehavior = .mutedWhenTapped
-                streamTap.isPrivate = true
-
-                var tapID: AudioObjectID = .unknown
-                let err = AudioHardwareCreateProcessTap(streamTap, &tapID)
-                if err == noErr {
-                    logger.info("Created stream-specific tap for device \(deviceUID, privacy: .public) (stream \(outputStream))")
-                    maybeLogEQBypass(for: tapID)
-                    return (streamTap, tapID)
-                }
-
-                lastError = err
-                logger.warning("Stream-specific tap creation failed for device \(deviceUID, privacy: .public) stream \(outputStream): \(err). Falling back to stereo mixdown.")
-            } else {
-                logger.warning("Could not resolve an output stream index for device \(deviceUID, privacy: .public). Falling back to stereo mixdown.")
-            }
-        }
-
-        let mixdownTap = CATapDescription(stereoMixdownOfProcesses: app.processObjectIDs)
-        mixdownTap.uuid = UUID()
-        mixdownTap.muteBehavior = .mutedWhenTapped
-        mixdownTap.isPrivate = true
-
-        var mixdownTapID: AudioObjectID = .unknown
-        let mixdownErr = AudioHardwareCreateProcessTap(mixdownTap, &mixdownTapID)
-        guard mixdownErr == noErr else {
-            throw NSError(
-                domain: NSOSStatusErrorDomain,
-                code: Int(mixdownErr),
-                userInfo: [
-                    NSLocalizedDescriptionKey: "Failed to create process tap (stream-specific err: \(lastError), mixdown err: \(mixdownErr))"
-                ]
-            )
-        }
-
-        if preferredDeviceUID != nil {
-            logger.info("Using stereo mixdown tap fallback")
-        }
-        maybeLogEQBypass(for: mixdownTapID)
-        return (mixdownTap, mixdownTapID)
-    }
-
-    func activate() throws { try activate(initialDSP: TapDSPConfiguration()) }
-
-    func activate(initialDSP: TapDSPConfiguration) throws {
-        guard !activated else { return }
-
-        logger.debug("Activating tap for \(self.app.name)")
-
-        // Reset health tracking for fresh activation
-        _lastRenderHostTime = 0
-        _activationHostTime = mach_absolute_time()
-        _hasRenderedAudio = false
-
-        // Create process tap. Prefer stream-specific tap for multichannel devices to avoid
-        // stereo matrix attenuation on interfaces with many output channels.
-        let (tapDesc, tapID) = try createProcessTap(preferredDeviceUID: preferredTapSourceDeviceUID)
-        primaryResources.tapDescription = tapDesc
-        let preferred = preferredStereoChannels(for: targetDeviceUIDs.first)
-        _primaryPreferredStereoLeftChannel = preferred.left
-        _primaryPreferredStereoRightChannel = preferred.right
-
-        primaryResources.tapID = tapID
-        logger.debug("Created process tap #\(tapID)")
-
-        // Build multi-device aggregate description
-        // First device is clock source, others have drift compensation for sync
-        let description = buildAggregateDescription(
-            outputUIDs: targetDeviceUIDs,
-            tapUUID: tapDesc.uuid,
-            name: "FineTune-\(app.id)"
-        )
-
-        var err: OSStatus
-        var aggID: AudioObjectID = .unknown
-        err = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggID)
-        guard err == noErr else {
-            cleanupPartialActivation()
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(err), userInfo: [NSLocalizedDescriptionKey: "Failed to create aggregate device: \(err)"])
-        }
-        primaryResources.aggregateDeviceID = aggID
-        CrashGuard.trackDevice(aggID)
-
-        guard primaryResources.aggregateDeviceID.waitUntilReady(timeout: 2.0) else {
-            cleanupPartialActivation()
-            throw NSError(domain: "ProcessTapController", code: -1, userInfo: [NSLocalizedDescriptionKey: "Aggregate device not ready within timeout"])
-        }
-
-        logger.debug("Created aggregate device #\(self.primaryResources.aggregateDeviceID)")
-
-        // Read actual device sample rate so the ramp matches the device's clock.
-        let sampleRate: Float64
-        if let deviceSampleRate = try? primaryResources.aggregateDeviceID.readNominalSampleRate() {
-            sampleRate = deviceSampleRate
-            logger.info("Device sample rate: \(sampleRate) Hz")
-        } else {
-            sampleRate = 48000
-            logger.warning("Failed to read sample rate, using default: \(sampleRate) Hz")
-        }
-        rampCoefficient = Self.rampCoefficient(forSampleRate: sampleRate)
-        logger.debug("Ramp coefficient: \(self.rampCoefficient)")
-
-        let processors = initialDSP.makeProcessors(sampleRate: sampleRate)
-        eqProcessor = processors.eq
-        autoEQProcessor = processors.autoEQ
-        loudnessEqualizerProcessor = processors.equalizer
-        loudnessCompensator = processors.compensator
-        _lastLoudnessVolume = initialDSP.loudnessVolume
-        _dspBypass = initialDSP.bypass
-
-        // Create IO proc with gain processing
-        let activateCallbackID = reservePrimaryCallbackID()
-        let activateTiming = RenderTimingState()
-        err = AudioDeviceCreateIOProcIDWithBlock(&primaryResources.deviceProcID, primaryResources.aggregateDeviceID, queue) { [weak self] _, inInputData, _, outOutputData, _ in
-            guard let self else {
-                // Zero output to prevent garbage audio if controller is deallocated
-                let outputs = UnsafeMutableAudioBufferListPointer(outOutputData)
-                for buf in outputs {
-                    if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
-                }
-                return
-            }
-            self.processAudioCallback(inInputData, to: outOutputData, callbackID: activateCallbackID, timing: activateTiming)
-        }
-        guard err == noErr else {
-            cleanupPartialActivation()
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(err), userInfo: [NSLocalizedDescriptionKey: "Failed to create IO proc: \(err)"])
-        }
-
-        disableHardwareInputStreams(aggregateID: primaryResources.aggregateDeviceID, procID: primaryResources.deviceProcID)
-
-        // Snap the ramped current volume to the target BEFORE starting IO, so the
-        // very first render callback applies the correct gain instead of ramping up
-        // from the default 1.0. Without this, a freshly-created tap (e.g. when an
-        // idle app resumes audio after its previous tap was cleaned up) briefly
-        // outputs at unity and then ramps down to the app's effective gain — an
-        // audible "volume bump" at onset. Snapping before AudioDeviceStart closes
-        // the race entirely; both roles are covered for safety.
-        _primaryCurrentVolume = _volume
-        _secondaryCurrentVolume = _volume
-        OSMemoryBarrier()
-
-        err = AudioDeviceStart(primaryResources.aggregateDeviceID, primaryResources.deviceProcID)
-        guard err == noErr else {
-            cleanupPartialActivation()
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(err), userInfo: [NSLocalizedDescriptionKey: "Failed to start device: \(err)"])
-        }
-
-        // Track current devices for external queries
-        currentDeviceUIDs = targetDeviceUIDs
-
-        activated = true
-        recordRenderClock(aggregateDeviceID: primaryResources.aggregateDeviceID, sampleRate: sampleRate)
-        logger.info("Tap activated for \(self.app.name) on \(self.targetDeviceUIDs.count) device(s)")
-    }
-
-    /// Switch to a single device (convenience for backward compatibility).
-    /// - Parameter sourceDeviceDead: If true, skips crossfade (source has no audio to blend from).
-    func switchDevice(to newDeviceUID: String, preferredTapSourceDeviceUID: String? = nil, sourceDeviceDead: Bool = false) async throws {
-        try await updateDevices(to: [newDeviceUID], preferredTapSourceDeviceUID: preferredTapSourceDeviceUID, sourceDeviceDead: sourceDeviceDead)
-    }
-
-    /// Updates output devices using crossfade for seamless transition.
-    /// Creates a second tap+aggregate for the new device set, crossfades, then destroys the old one.
-    /// - Parameter sourceDeviceDead: If true, skips crossfade and uses destructive switch
-    ///   (the source device is disconnected, so there's no audio to blend from).
-    func updateDevices(to newDeviceUIDs: [String], preferredTapSourceDeviceUID: String? = nil, sourceDeviceDead: Bool = false) async throws {
-        precondition(!newDeviceUIDs.isEmpty, "Must have at least one target device")
-        guard activated else {
-            self.preferredTapSourceDeviceUID = preferredTapSourceDeviceUID
-            targetDeviceUIDs = newDeviceUIDs
-            return
-        }
-        try await deviceTransition.run { [self] in
-            guard activated, !_invalidating else { throw CancellationError() }
-            // Check after predecessor cleanup: returning to the current route
-            // must still cancel a different route that was being prepared.
-            self.preferredTapSourceDeviceUID = preferredTapSourceDeviceUID
-            guard newDeviceUIDs != currentDeviceUIDs else { return }
-            try await switchPreparedDevices(to: newDeviceUIDs, sourceDeviceDead: sourceDeviceDead)
+    private func makeLiveTap(uids: [String], role: TapRenderContext.Role, initialVolume: Float?) async throws -> LiveTap {
+        try await TapLifecycleAdmission.shared.acquire(executor: executor, timeout: timeout)
+        defer { TapLifecycleAdmission.shared.release() }
+        retirements.retryFailed()
+        guard retirements.allowsCapture else { throw TapLifecycleError.retirementFailed }
+        let plan = TapHALPlan(pid: app.id, processObjectIDs: app.processObjectIDs,
+                              outputUIDs: uids, preferredSourceUID: preferredSource)
+        let adapter = self.adapter, queue = retirements
+        let resource = try await executor.run(timeout: timeout, work: { try adapter.prepare(plan) }, discard: { result in
+            if case .success(let resource) = result { resource.retire(adapter: adapter, queue: queue) }
+        })
+        var startSubmitted = false
+        var startReturned = false
+        var context: TapRenderContext?
+        do {
             try Task.checkCancellation()
-            targetDeviceUIDs = newDeviceUIDs
-            currentDeviceUIDs = newDeviceUIDs
+            nextID &+= 1; if nextID == 0 { nextID = 1 }
+            let render = TapRenderContext(id: nextID, sampleRate: resource.sampleRate,
+                stereoLeft: resource.stereoLeft, stereoRight: resource.stereoRight,
+                role: role, crossfade: crossfade, dsp: dsp, volume: initialVolume ?? volume, muted: isMuted)
+            context = render
+            pending = render
+            render.update(volume: volume, muted: isMuted, bypass: dsp.bypass)
+            startSubmitted = true
+            let _: PreparedTap = try await executor.run(timeout: timeout, work: {
+                guard render.role != .retired else { throw CancellationError() }
+                try adapter.start(resource, context: render)
+                return resource
+            }, discard: { _ in
+                render.setRole(.retired)
+                resource.retire(adapter: adapter, queue: queue)
+            })
+            startReturned = true
+            try Task.checkCancellation()
+            return LiveTap(resource: resource, context: render, adapter: adapter, queue: queue)
+        } catch {
+            context?.setRole(.retired)
+            if let context, pending === context { pending = nil }
+            // While start is still blocked the WORKER owns the resource. Its
+            // discard hook retires it later; never race destroy against start.
+            if !startSubmitted || startReturned { resource.retire(adapter: adapter, queue: queue) }
+            throw error
         }
     }
-
-    private func switchPreparedDevices(to deviceUIDs: [String], sourceDeviceDead: Bool) async throws {
-        guard let primaryUID = deviceUIDs.first else { return }
-        if sourceDeviceDead {
-            guard primaryResources.tapDescription != nil else { throw CrossfadeError.noTapDescription }
-            try await performDestructiveDeviceSwitch(to: primaryUID, allDeviceUIDs: deviceUIDs, sourceAlreadySilent: true)
-        } else {
+    private func retire(_ live: LiveTap) {
+        live.context.setRole(.retired)
+        if pending === live.context { pending = nil }
+        tickets.append(live.resource.retire(adapter: adapter, queue: retirements))
+        tickets.removeAll { $0.result == true }
+    }
+    func switchDevice(to uid: String, preferredTapSourceDeviceUID: String?, sourceDeviceDead: Bool) async throws {
+        try await updateDevices(to: [uid], preferredTapSourceDeviceUID: preferredTapSourceDeviceUID, sourceDeviceDead: sourceDeviceDead)
+    }
+    func updateDevices(to uids: [String], preferredTapSourceDeviceUID: String?, sourceDeviceDead: Bool) async throws {
+        precondition(!uids.isEmpty)
+        try await transition.run { [self] in
+            guard activated else { targetDeviceUIDs = uids; currentDeviceUIDs = uids; preferredSource = preferredTapSourceDeviceUID; return }
+            preferredSource = preferredTapSourceDeviceUID
+            guard uids != currentDeviceUIDs else { return }
+            try await replace(uids: uids, sourceDead: sourceDeviceDead)
+        }
+    }
+    func refreshTapSource(_ uid: String?) async throws {
+        try await transition.run { [self] in
+            guard preferredSource != uid else { return }
+            preferredSource = uid
+            guard activated else { return }
+            try await replace(uids: currentDeviceUIDs, sourceDead: false)
+        }
+    }
+    private func replace(uids: [String], sourceDead: Bool) async throws {
+        switching = true; defer { switching = false }
+        let epoch = generation
+        if !sourceDead {
             do {
-                try await performCrossfadeSwitch(to: primaryUID, allDeviceUIDs: deviceUIDs)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
+                crossfade.beginWarmup()
+                let live = try await makeLiveTap(uids: uids, role: .secondary, initialVolume: nil)
+                guard generation == epoch, activated, !Task.isCancelled else { retire(live); throw CancellationError() }
+                secondary = live; pending = nil
+                var promoted = false
+                defer {
+                    if !promoted { retire(live); secondary = nil; crossfade.complete() }
+                }
+                let profile = live.resource.profile
+                crossfade.totalSamples = CrossfadeConfig.totalSamples(at: live.resource.sampleRate, for: profile)
+                try await Task.sleep(for: .milliseconds(profile.warmupMs))
+                guard try await crossfade.waitForWarmup(timeout: .milliseconds(profile.timeoutExtraMs)) else { throw CrossfadeError.secondaryTapFailed }
+                crossfade.beginCrossfading()
+                let deadline = ContinuousClock.now.advanced(by: .seconds(CrossfadeConfig.duration(for: profile) + Double(profile.timeoutExtraMs) / 1000))
+                while !crossfade.isCrossfadeComplete, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(5))
+                }
                 try Task.checkCancellation()
-                guard activated, primaryResources.tapDescription != nil else { throw CrossfadeError.noTapDescription }
-                logger.warning("Crossfade failed: \(error.localizedDescription), using destructive fallback")
-                try await performDestructiveDeviceSwitch(to: primaryUID, allDeviceUIDs: deviceUIDs)
+                guard crossfade.isCrossfadeComplete, generation == epoch, activated else { throw CrossfadeError.secondaryTapFailed }
+                if let primary { retire(primary) }
+                live.context.setRole(.primary)
+                primary = live; secondary = nil; promoted = true; crossfade.complete()
+                targetDeviceUIDs = uids; currentDeviceUIDs = uids
+                return
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                try Task.checkCancellation()
+                crossfade.complete()
+                logger.warning("Crossfade failed, attempting prepared replacement: \(error.localizedDescription)")
             }
         }
+        if let primary { primary.context.update(volume: volume, muted: isMuted, bypass: dsp.bypass, silent: true) }
+        defer { updateParameters() }
+        let live = try await makeLiveTap(uids: uids, role: .primary, initialVolume: 0)
+        guard generation == epoch, activated, !Task.isCancelled else { retire(live); throw CancellationError() }
+        if let primary { retire(primary) }
+        primary = live; pending = nil
+        targetDeviceUIDs = uids; currentDeviceUIDs = uids
     }
-
-    func refreshTapSource(_ preferredDeviceUID: String?) async throws {
-        try await deviceTransition.run { [self] in
-            guard activated, !_invalidating, !currentDeviceUIDs.isEmpty else { throw CancellationError() }
-            guard preferredTapSourceDeviceUID != preferredDeviceUID else { return }
-            preferredTapSourceDeviceUID = preferredDeviceUID
-            try await switchPreparedDevices(to: currentDeviceUIDs, sourceDeviceDead: false)
-        }
-    }
-
-    /// Tears down the tap and releases all CoreAudio resources.
-    /// Safe to call multiple times - subsequent calls are no-ops.
-    private var _invalidating = false
     func invalidate() {
-        guard beginInvalidation() else { return }
-        defer { endInvalidation() }
-
-        // destroyAsync() captures IDs, clears instance state immediately,
-        // then dispatches blocking teardown to a background queue.
-        // Safe even if activate() is called again before cleanup completes.
-        secondaryResources.destroyAsync()
-        primaryResources.destroyAsync()
-
-        logger.info("Tap invalidated for \(self.app.name)")
+        generation &+= 1; activated = false; activationTick = 0
+        activation?.cancel(); transition.cancel()
+        pending?.setRole(.retired) // start worker retains ownership until it returns
+        pending = nil
+        if let primary { retire(primary) }; primary = nil
+        if let secondary { retire(secondary) }; secondary = nil
+        testContext?.setRole(.retired); testContext = nil
+        crossfade.complete()
     }
-
-    /// Awaitable invalidation: suspends until CoreAudio resources are fully
-    /// destroyed. Prevents orphaned IO procs when a new tap is created immediately after.
-    func invalidateAsync() async {
-        guard beginInvalidation() else { return }
-        defer { endInvalidation() }
-
-        // Await full teardown of both resource sets (uses .userInitiated QoS for timely cleanup)
-        await withCheckedContinuation { continuation in
-            secondaryResources.destroyAsync(on: .global(qos: .userInitiated)) {
-                continuation.resume()
-            }
-        }
-        await withCheckedContinuation { continuation in
-            primaryResources.destroyAsync(on: .global(qos: .userInitiated)) {
-                continuation.resume()
-            }
-        }
-
-        logger.info("Tap invalidated (async) for \(self.app.name)")
-    }
-
-    // MARK: - Invalidation Helpers
-
-    /// Shared preamble for invalidation. Returns false if already invalidating or not activated.
-    private func beginInvalidation() -> Bool {
-        guard activated, !_invalidating else { return false }
-        _invalidating = true
-        activated = false
-
-        _lastRenderHostTime = 0
-        _activationHostTime = 0
-        _hasRenderedAudio = false
-        renderClock = nil
-        secondaryRenderClock = nil
-
-        deviceTransition.cancel()
-
-        logger.debug("Invalidating tap for \(self.app.name)")
-
-        crossfadeState.complete()
-        callbackIDs.store(0, ordering: .releasing)
-
-        return true
-    }
-
-    /// Shared epilogue for invalidation. Clears EQ state and resets the reentrant guard.
-    private func endInvalidation() {
-        secondaryEQProcessor = nil
-        secondaryAutoEQProcessor = nil
-        secondaryLoudnessCompensator = nil
-        secondaryLoudnessEqualizerProcessor = nil
-        _invalidating = false
-    }
-
-    deinit {
+    func invalidateAndWait() async throws {
         invalidate()
+        for ticket in tickets { guard await ticket.wait(timeout: timeout) else { throw TapLifecycleError.retirementFailed } }
+        tickets.removeAll { $0.result == true }
     }
+    func invalidateAsync() async { try? await invalidateAndWait() }
 
-    // MARK: - Crossfade Operations
-
-    private func performCrossfadeSwitch(to primaryDeviceUID: String, allDeviceUIDs: [String]? = nil) async throws {
-        let deviceUIDs = allDeviceUIDs ?? [primaryDeviceUID]
-
-        // The coordinator awaits predecessor cleanup before entering here.
-        precondition(!isSwitching, "Device transitions must be serialized")
-        isSwitching = true
-        defer { isSwitching = false }
-
-        logger.info("[CROSSFADE] Step 1: Reading device volumes for compensation")
-
-        // Pick a per-transport profile so the crossfade duration, warmup, and
-        // timeout match the destination device's settling behavior. Wired/USB
-        // get a snappier transition; Bluetooth gets longer warmup + timeout.
-        let destTransport = deviceMonitor?.device(for: primaryDeviceUID)?.id.readTransportType()
-        let profile = CrossfadeProfile.profile(for: destTransport)
-        logger.debug("[CROSSFADE] Destination transport=\(destTransport?.description ?? "nil"), profile crossfade=\(profile.crossfadeDuration * 1000)ms warmup=\(profile.warmupMs)ms")
-
-        logger.info("[CROSSFADE] Step 2: Preparing crossfade state")
-
-        // Enter warmingUp phase before tap creation so audio callbacks see correct state.
-        // totalSamples is set inside createSecondaryTap after reading sample rate.
-        crossfadeState.beginWarmup()
-
-        logger.info("[CROSSFADE] Step 3: Creating secondary tap for \(deviceUIDs.count) device(s)")
-        // LIFE-004/005: Ensure secondary tap is cleaned up if crossfade fails or is cancelled
-        var crossfadeCompleted = false
-        defer {
-            if !crossfadeCompleted {
-                logger.warning("[CROSSFADE] Cleaning up secondary tap after failure/cancellation")
-                cleanupSecondaryTap()
-                crossfadeState.complete()
-            }
-        }
-
-        try createSecondaryTap(for: deviceUIDs, profile: profile)
-
-        let warmupMs = profile.warmupMs
-        logger.info("[CROSSFADE] Step 4: Waiting for secondary tap warmup (\(warmupMs)ms)...")
-        // Preserve transport settling time (notably Bluetooth) as well as
-        // requiring real callback evidence before the audible fade starts.
-        try await Task.sleep(for: .milliseconds(warmupMs))
-        guard try await crossfadeState.waitForWarmup(timeout: .milliseconds(profile.timeoutExtraMs)) else {
-            throw CrossfadeError.secondaryTapFailed
-        }
-
-        // Warmup duration and callback evidence are both satisfied.
-        crossfadeState.beginCrossfading()
-        let crossfadeMs = CrossfadeConfig.duration(for: profile) * 1000
-        logger.info("[CROSSFADE] Step 5: Crossfade in progress (\(crossfadeMs)ms)")
-
-        let timeoutMs = Int(CrossfadeConfig.duration(for: profile) * 1000) + profile.timeoutExtraMs
-        let pollIntervalMs: UInt64 = 5
-        var elapsedMs: Int = 0
-
-        while (!crossfadeState.isCrossfadeComplete || !crossfadeState.isWarmupComplete) && elapsedMs < timeoutMs {
-            try await Task.sleep(for: .milliseconds(pollIntervalMs))
-            elapsedMs += Int(pollIntervalMs)
-        }
-
-        // A live resource ID cannot compensate for a secondary that stopped
-        // delivering frames. Keep the primary and enter the fallback on timeout.
-        guard crossfadeState.isCrossfadeComplete else {
-            throw CrossfadeError.secondaryTapFailed
-        }
-
-        try Task.checkCancellation()
-        // IDs alone do not prove a secondary has ever rendered.
-        guard crossfadeState.isWarmupComplete else { throw CrossfadeError.secondaryTapFailed }
-        // Verify secondary tap is valid before promotion
-        guard secondaryResources.aggregateDeviceID.isValid, secondaryResources.deviceProcID != nil else {
-            logger.error("[CROSSFADE] Secondary tap invalid after timeout")
-            // defer will handle cleanup (cleanupSecondaryTap + crossfadeState.complete)
-            throw CrossfadeError.secondaryTapFailed
-        }
-
-        try await Task.sleep(for: .milliseconds(10))
-
-        logger.info("[CROSSFADE] Crossfade complete, promoting secondary")
-
-        destroyPrimaryTap()
-        promoteSecondaryToPrimary()
-
-        crossfadeState.complete()
-        crossfadeCompleted = true
-
-        logger.info("[CROSSFADE] Complete")
+    /// Used by callback regressions without opening a CoreAudio resource.
+    func reservePrimaryCallbackID() -> UInt32 {
+        testContext?.setRole(.retired)
+        nextID &+= 1; if nextID == 0 { nextID = 1 }
+        testContext = TapRenderContext(id: nextID, sampleRate: 48_000, role: .primary,
+            crossfade: crossfade, dsp: dsp, volume: volume, muted: isMuted)
+        return nextID
     }
-
-    private func createSecondaryTap(for outputUIDs: [String], profile: CrossfadeProfile = .bluetoothLegacy) throws {
-        precondition(!outputUIDs.isEmpty, "Must have at least one output device")
-
-        let (tapDesc, tapID) = try createProcessTap(preferredDeviceUID: preferredTapSourceDeviceUID)
-        secondaryResources.tapDescription = tapDesc
-        let preferred = preferredStereoChannels(for: outputUIDs.first)
-        _secondaryPreferredStereoLeftChannel = preferred.left
-        _secondaryPreferredStereoRightChannel = preferred.right
-
-        secondaryResources.tapID = tapID
-        logger.debug("[CROSSFADE] Created secondary tap #\(tapID)")
-
-        // Build multi-device aggregate description using helper
-        let description = buildAggregateDescription(
-            outputUIDs: outputUIDs,
-            tapUUID: tapDesc.uuid,
-            name: "FineTune-\(app.id)-secondary"
-        )
-
-        var err: OSStatus
-        var aggID: AudioObjectID = .unknown
-        err = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggID)
-        guard err == noErr else {
-            // TapResources.destroy() handles correct teardown order + CrashGuard.untrackDevice
-            secondaryResources.destroy()
-            throw CrossfadeError.aggregateCreationFailed(err)
-        }
-        secondaryResources.aggregateDeviceID = aggID
-        CrashGuard.trackDevice(aggID)
-
-        guard secondaryResources.aggregateDeviceID.waitUntilReady(timeout: 2.0) else {
-            secondaryResources.destroy()
-            throw CrossfadeError.deviceNotReady
-        }
-
-        logger.debug("[CROSSFADE] Created secondary aggregate #\(self.secondaryResources.aggregateDeviceID)")
-
-        let sampleRate: Double
-        if let deviceSampleRate = try? secondaryResources.aggregateDeviceID.readNominalSampleRate() {
-            sampleRate = deviceSampleRate
-        } else {
-            sampleRate = 48000
-        }
-        crossfadeState.totalSamples = CrossfadeConfig.totalSamples(at: sampleRate, for: profile)
-
-        secondaryRampCoefficient = Self.rampCoefficient(forSampleRate: sampleRate)
-        secondaryRenderClock = TapRenderClock(aggregateDeviceID: aggID, sampleRate: sampleRate)
-
-        _secondaryCurrentVolume = _primaryCurrentVolume
-
-        // Create independent EQ processors for the secondary tap.
-        // Each tap needs its own biquad delay buffers — sharing would corrupt filter state
-        // because both callbacks run concurrently on different HAL I/O threads.
-        let secEQ = EQProcessor(sampleRate: sampleRate)
-        if let settings = eqProcessor?.currentSettings {
-            secEQ.updateSettings(settings)
-        }
-        secondaryEQProcessor = secEQ
-
-        secondaryAutoEQProcessor = autoEQProcessor?.makeCopy(sampleRate: sampleRate) ?? AutoEQProcessor(sampleRate: sampleRate)
-
-        let secLoudnessEqualizer = LoudnessEqualizer(settings: loudnessEqualizerProcessor?.currentSettings ?? LoudnessEqualizerSettings(), sampleRate: Float(sampleRate))
-        secondaryLoudnessEqualizerProcessor = secLoudnessEqualizer
-
-        let secLoudness = LoudnessCompensator(sampleRate: sampleRate)
-        secLoudness.updateForVolume(_lastLoudnessVolume)
-        if !(loudnessCompensator?.isEnabled ?? false) { secLoudness.setEnabled(false) }
-        secondaryLoudnessCompensator = secLoudness
-
-        nextCallbackID += 1
-        _secondaryCallbackID = nextCallbackID
-        let secondaryCallbackID = nextCallbackID
-        let secondaryTiming = RenderTimingState()
-        err = AudioDeviceCreateIOProcIDWithBlock(&secondaryResources.deviceProcID, secondaryResources.aggregateDeviceID, queue) { [weak self] _, inInputData, _, outOutputData, _ in
-            guard let self else {
-                // Zero output to prevent garbage audio if controller is deallocated
-                let outputs = UnsafeMutableAudioBufferListPointer(outOutputData)
-                for buf in outputs {
-                    if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
-                }
-                return
-            }
-            self.processAudioCallback(inInputData, to: outOutputData, callbackID: secondaryCallbackID, timing: secondaryTiming)
-        }
-        guard err == noErr else {
-            secondaryResources.destroy()
-            throw CrossfadeError.tapCreationFailed(err)
-        }
-
-        disableHardwareInputStreams(aggregateID: secondaryResources.aggregateDeviceID, procID: secondaryResources.deviceProcID)
-
-        err = AudioDeviceStart(secondaryResources.aggregateDeviceID, secondaryResources.deviceProcID)
-        guard err == noErr else {
-            secondaryResources.destroy()
-            throw CrossfadeError.tapCreationFailed(err)
-        }
-
-        logger.debug("[CROSSFADE] Secondary tap started")
-    }
-
-    private func destroyPrimaryTap() {
-        primaryResources.destroyAsync()
-    }
-
-    /// Tears down any in-progress secondary tap (used by re-entrant crossfade guard).
-    private func cleanupSecondaryTap() {
-        // Even failed creation can leave processors after resource IDs were
-        // cleared. Always clear those references and the callback identity.
-        _secondaryCallbackID = 0
-        secondaryResources.destroy()
-        secondaryEQProcessor = nil
-        secondaryAutoEQProcessor = nil
-        secondaryLoudnessCompensator = nil
-        secondaryLoudnessEqualizerProcessor = nil
-        secondaryRenderClock = nil
-    }
-
-    private func promoteSecondaryToPrimary() {
-        primaryResources = secondaryResources
-        secondaryResources = TapResources()
-
-        // Carry the rate actually used by the secondary DSP into the primary
-        // snapshot. Re-reading HAL here could hide a rate change that happened
-        // after secondary creation, leaving its DSP at the earlier rate.
-        rampCoefficient = secondaryRampCoefficient
-        if let clock = secondaryRenderClock {
-            recordRenderClock(aggregateDeviceID: primaryResources.aggregateDeviceID, sampleRate: clock.sampleRate)
-        } else {
-            renderClock = nil
-        }
-        secondaryRenderClock = nil
-
-        // Adopt secondary EQ processors as primary.
-        // The old primary processors may still be referenced by a just-completed primary callback,
-        // so defer their deallocation to ensure no use-after-free on the RT thread.
-        let oldEQ = eqProcessor
-        let oldAutoEQ = autoEQProcessor
-        let oldLoudness = loudnessCompensator
-        let oldLoudnessEqualizer = loudnessEqualizerProcessor
-        eqProcessor = secondaryEQProcessor
-        autoEQProcessor = secondaryAutoEQProcessor
-        loudnessCompensator = secondaryLoudnessCompensator
-        loudnessEqualizerProcessor = secondaryLoudnessEqualizerProcessor
-        secondaryEQProcessor = nil
-        secondaryAutoEQProcessor = nil
-        secondaryLoudnessCompensator = nil
-        secondaryLoudnessEqualizerProcessor = nil
-
-        // Deferred cleanup: hold old processors alive briefly so any in-flight RT callback
-        // that read the pointer before the swap finishes its buffer without accessing freed memory.
-        // 0.5s is conservative — audio callbacks run at ~5ms intervals.
-        if oldEQ != nil || oldAutoEQ != nil || oldLoudness != nil || oldLoudnessEqualizer != nil {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                _ = oldEQ
-                _ = oldAutoEQ
-                _ = oldLoudness
-                _ = oldLoudnessEqualizer
-            }
-        }
-
-        _primaryCurrentVolume = _secondaryCurrentVolume
-        _secondaryCurrentVolume = 0
-        _primaryPreferredStereoLeftChannel = _secondaryPreferredStereoLeftChannel
-        _primaryPreferredStereoRightChannel = _secondaryPreferredStereoRightChannel
-
-        // Reassign callback role AFTER all state is swapped.
-        // The barrier ensures the HAL I/O thread sees the updated EQ processors,
-        // volume, ramp coefficient, and stereo channels BEFORE it sees the new
-        // _primaryCallbackID and switches to primary-role behavior.
-        OSMemoryBarrier()  // Flush all prior state stores before publishing new role
-        callbackIDs.store(UInt64(_secondaryCallbackID), ordering: .releasing)
-
-        // CrossfadeState reset is handled by performCrossfadeSwitch after promotion.
-    }
-
-    /// Performs a destructive (non-crossfade) device switch with silence padding.
-    /// - Parameter sourceAlreadySilent: If true (e.g. source device disconnected), skips the
-    ///   pre-switch silence wait and uses a shorter post-switch settle time.
-    private func performDestructiveDeviceSwitch(to primaryDeviceUID: String, allDeviceUIDs: [String]? = nil, sourceAlreadySilent: Bool = false) async throws {
-        let deviceUIDs = allDeviceUIDs ?? [primaryDeviceUID]
-        let originalVolume = _volume
-
-        // Mark the switch window so the liveness watchdog (isResourceAlive checks
-        // `!isSwitching`) never tears down the tap mid-teardown/rebuild.
-        isSwitching = true
-        defer { isSwitching = false }
-
-        _forceSilence = true
-        OSMemoryBarrier()
-        // LIFE-011: Ensure _forceSilence is always cleared, even if switch throws
-        defer { _forceSilence = false; OSMemoryBarrier() }
-        logger.info("[SWITCH-DESTROY] Enabled _forceSilence=true (sourceAlreadySilent=\(sourceAlreadySilent))")
-
-        if !sourceAlreadySilent {
-            // Wait for current audio to drain before tearing down the old device
-            try await Task.sleep(for: .milliseconds(100))
-        }
-
-        try performDeviceSwitch(to: deviceUIDs)
-
-        _primaryCurrentVolume = 0
-        _volume = 0
-        // The ramp below sleeps at every step, and each sleep throws on task
-        // cancellation (a newer switch or invalidate()) — which used to strand
-        // `_volume` at 0 or a fraction of the target, leaving the app near-silent
-        // until the user next touched its slider. Always land on the captured
-        // target; on the success path the loop's final step wrote it anyway.
-        defer { _volume = originalVolume }
-
-        // Post-switch settle: shorter when source was already silent (no old audio to drain)
-        let settleMs = sourceAlreadySilent ? 80 : 150
-        try await Task.sleep(for: .milliseconds(settleMs))
-
-        _forceSilence = false
-
-        for i in 1...10 {
-            _volume = originalVolume * Float(i) / 10.0
-            try await Task.sleep(for: .milliseconds(20))
-        }
-
-        logger.info("[SWITCH-DESTROY] Complete")
-    }
-
-    private func performDeviceSwitch(to outputUIDs: [String]) throws {
-        precondition(!outputUIDs.isEmpty, "Must have at least one output device")
-
-        var newResources = TapResources()
-
-        let (newTapDesc, tapID) = try createProcessTap(preferredDeviceUID: preferredTapSourceDeviceUID)
-        newResources.tapDescription = newTapDesc
-        // SAFETY: _forceSilence must be true before reaching here (set by performDestructiveDeviceSwitch).
-        // The old IO proc is still running until primaryResources.destroy() below, but both
-        // _forceSilence (primary role zeros output) and the stale callbackID (after reassignment
-        // below, old callback no longer matches _primaryCallbackID → zeros output) prevent races
-        // with processMappedBuffers().
-        let preferred = preferredStereoChannels(for: outputUIDs.first)
-        _primaryPreferredStereoLeftChannel = preferred.left
-        _primaryPreferredStereoRightChannel = preferred.right
-
-        newResources.tapID = tapID
-
-        // Build multi-device aggregate description using helper
-        let description = buildAggregateDescription(
-            outputUIDs: outputUIDs,
-            tapUUID: newTapDesc.uuid,
-            name: "FineTune-\(app.id)"
-        )
-
-        var err: OSStatus
-        var aggID: AudioObjectID = .unknown
-        err = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggID)
-        guard err == noErr else {
-            newResources.destroy()
-            throw CrossfadeError.aggregateCreationFailed(err)
-        }
-        newResources.aggregateDeviceID = aggID
-        CrashGuard.trackDevice(aggID)
-
-        guard newResources.aggregateDeviceID.waitUntilReady(timeout: 2.0) else {
-            newResources.destroy()
-            throw CrossfadeError.deviceNotReady
-        }
-
-        let switchCallbackID = reservePrimaryCallbackID()
-        let switchTiming = RenderTimingState()
-        err = AudioDeviceCreateIOProcIDWithBlock(&newResources.deviceProcID, newResources.aggregateDeviceID, queue) { [weak self] _, inInputData, _, outOutputData, _ in
-            guard let self else {
-                // Zero output to prevent garbage audio if controller is deallocated
-                let outputs = UnsafeMutableAudioBufferListPointer(outOutputData)
-                for buf in outputs {
-                    if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
-                }
-                return
-            }
-            self.processAudioCallback(inInputData, to: outOutputData, callbackID: switchCallbackID, timing: switchTiming)
-        }
-        guard err == noErr else {
-            newResources.destroy()
-            throw CrossfadeError.tapCreationFailed(err)
-        }
-
-        disableHardwareInputStreams(aggregateID: newResources.aggregateDeviceID, procID: newResources.deviceProcID)
-
-        err = AudioDeviceStart(newResources.aggregateDeviceID, newResources.deviceProcID)
-        guard err == noErr else {
-            newResources.destroy()
-            throw CrossfadeError.tapCreationFailed(err)
-        }
-
-        // Destroy old resources, adopt new
-        primaryResources.destroy()
-        primaryResources = newResources
-        targetDeviceUIDs = outputUIDs
-        currentDeviceUIDs = outputUIDs
-
-        let deviceSampleRate = try? primaryResources.aggregateDeviceID.readNominalSampleRate()
-        if let deviceSampleRate {
-            rampCoefficient = 1 - exp(-1 / (Float(deviceSampleRate) * 0.030))
-            eqProcessor?.updateSampleRate(deviceSampleRate)
-            autoEQProcessor?.updateSampleRate(deviceSampleRate)
-            loudnessCompensator?.updateSampleRate(deviceSampleRate)
-
-            // LoudnessEqualizer is immutable — swap to new instance at new sample rate
-            if let oldLE = loudnessEqualizerProcessor {
-                let newLE = LoudnessEqualizer(
-                    settings: oldLE.currentSettings,
-                    sampleRate: Float(deviceSampleRate)
-                )
-                loudnessEqualizerProcessor = newLE
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { _ = oldLE }
-            }
-        }
-        if let activeSampleRate = deviceSampleRate ?? renderClock?.sampleRate {
-            recordRenderClock(aggregateDeviceID: primaryResources.aggregateDeviceID, sampleRate: activeSampleRate)
-        } else {
-            renderClock = nil
-        }
-    }
-
-    private func cleanupPartialActivation() {
-        primaryResources.destroy()
-        renderClock = nil
-    }
-
-    // `processMappedBuffers` (the per-frame mixer, ~165 lines) is defined in
-    // ProcessTapController+Mixer.swift. It's a `static` helper with no `self`
-    // dependencies, so isolating it there keeps this file focused on state
-    // and lifecycle while preserving identical RT-safety properties.
-
-
-    // MARK: - RT-Safe Audio Callback (DO NOT MODIFY WITHOUT RT-SAFETY REVIEW)
-    // This callback runs on CoreAudio's real-time HAL I/O thread.
-    // RT constraints: no allocation, locks, logging, or ObjC on this thread.
-
-    /// Unified audio processing callback for both primary and secondary taps.
-    /// Role is determined at runtime via callbackID comparison (atomic UInt32 read).
-    ///
-    /// After crossfade promotion, the promoted IO proc's callbackID is reassigned
-    /// to match _primaryCallbackID, so it seamlessly switches to primary-role
-    /// state (correct peak level, EQ processors, volume variable, crossfade curve).
-    ///
-    /// **RT SAFETY CONSTRAINTS — DO NOT:**
-    /// - Allocate memory (malloc, Array append, String operations)
-    /// - Acquire locks/mutexes
-    /// - Use Objective-C messaging
-    /// - Call print/logging functions
-    /// - Perform file/network I/O
-    // Internal for direct buffer regression tests; production calls originate in HAL IO procs.
-    func processAudioCallback(
-        _ inputBufferList: UnsafePointer<AudioBufferList>,
-        to outputBufferList: UnsafeMutablePointer<AudioBufferList>,
-        callbackID: UInt32,
-        timing: RenderTimingState? = nil
-    ) {
-        // Zero is the invalidation sentinel and can never identify a live IO proc.
-        let crossfadeGeneration = crossfadeState.generation
-        let ids = callbackIDs.load(ordering: .acquiring)
-        let isPrimary = callbackID != 0 && (callbackID == UInt32(truncatingIfNeeded: ids))
-        let isSecondary = callbackID != 0 && !isPrimary && (callbackID == UInt32(truncatingIfNeeded: ids >> 32))
-
-        let outputBuffers = UnsafeMutableAudioBufferListPointer(outputBufferList)
-
-        // Stale callback from a previous generation (e.g., old promoted tap after
-        // a second crossfade reassigned _primaryCallbackID) — zero output safely.
-        guard isPrimary || isSecondary else {
-            for buf in outputBuffers {
-                if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
-            }
-            return
-        }
-
-        // An asynchronously retired IO proc may keep firing while HAL tears it
-        // down. Its silent buffers must not make the replacement look healthy.
-        _lastRenderHostTime = mach_absolute_time()
-        _hasRenderedAudio = true
-        if isPrimary {
-            var frames = 0
-            for buffer in outputBuffers {
-                frames = max(frames, Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * max(1, Int(buffer.mNumberChannels))))
-            }
-            let time = Double(_lastRenderHostTime) * Self.hostTimeNanosScale / 1_000_000_000
-            if timing?.tracker.record(time: time, callbackID: callbackID,
-                                      bufferDuration: Double(frames) / max(1, primaryRenderSampleRate)) == true {
-                OSAtomicIncrement64Barrier(&renderLongGaps)
-            }
-            OSAtomicIncrement64Barrier(&renderCallbackCount)
-        }
-
-        // SAFETY: Mutable cast required by UnsafeMutableAudioBufferListPointer API,
-        // but we only read through this pointer. Input buffer data is owned by CoreAudio
-        // and valid for callback duration.
-        let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputBufferList))
-
-        // Force silence — primary only. During destructive device switch,
-        // _forceSilence is set before the old IO proc is torn down.
-        if isPrimary && _forceSilence {
-            for buf in outputBuffers {
-                if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
-            }
-            return
-        }
-
-        // Track peak level for VU meter. We sample channel 0 only (mono peak
-        // is a reasonable VU approximation and avoids quadrupling the work on
-        // 5.1/7.1 streams). `vDSP_maxmgv` returns max(|x_i|) using NEON SIMD —
-        // typically 4–8× faster than a scalar loop on Apple Silicon and stays
-        // fully RT-safe (no allocation, no locks, no ObjC).
-        var maxPeak: Float = 0.0
-        var totalSamplesThisBuffer: Int = 0
-        for inputBuffer in inputBuffers {
-            guard let inputData = inputBuffer.mData else { continue }
-            let inputSamples = inputData.assumingMemoryBound(to: Float.self)
-            let channels = max(1, Int(inputBuffer.mNumberChannels))
-            let sampleCount = Int(inputBuffer.mDataByteSize) / MemoryLayout<Float>.size
-            let frames = sampleCount / channels
-            if totalSamplesThisBuffer == 0 {
-                totalSamplesThisBuffer = frames
-            }
-            guard frames > 0 else { continue }
-            var bufferPeak: Float = 0
-            vDSP_maxmgv(
-                inputSamples,
-                vDSP_Stride(channels),
-                &bufferPeak,
-                vDSP_Length(frames)
-            )
-            if bufferPeak > maxPeak { maxPeak = bufferPeak }
-        }
-        let rawPeak = min(maxPeak, 1.0)
-
-        if isPrimary {
-            _peakLevel = _peakLevel + levelSmoothingFactor * (rawPeak - _peakLevel)
-        } else {
-            _secondaryPeakLevel = _secondaryPeakLevel + levelSmoothingFactor * (rawPeak - _secondaryPeakLevel)
-            // Only the secondary callback advances crossfade progress (single-writer pattern).
-            _ = crossfadeState.updateProgress(samples: totalSamplesThisBuffer, generation: crossfadeGeneration)
-        }
-
-        if _isMuted {
-            for buf in outputBuffers {
-                if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
-            }
-            return
-        }
-
-        let targetVol = _volume
-        // Load-shedding: when set (critical memory pressure), drop the optional
-        // DSP stage entirely. Read once so both the assignments below and the
-        // crossfade roles see a consistent value for this callback.
-        let dspBypass = _dspBypass
-        var currentVol: Float
-        let crossfadeMultiplier: Float
-        let rampCoeff: Float
-        let stereoLeft: Int
-        let stereoRight: Int
-        let eqProc: EQProcessor?
-        let autoEQProc: AutoEQProcessor?
-        let loudnessEqualizerProc: LoudnessEqualizer?
-        let loudnessCompensatorProc: LoudnessCompensator?
-
-        if isPrimary {
-            currentVol = _primaryCurrentVolume
-            // Equal-power crossfade: primary uses cosine curve (1→0).
-            // CrossfadeState.primaryMultiplier handles all phase logic including the
-            // race condition guard (returns 0.0 when progress >= 1.0 in idle phase).
-            crossfadeMultiplier = crossfadeState.primaryMultiplier
-            rampCoeff = rampCoefficient
-            stereoLeft = _primaryPreferredStereoLeftChannel
-            stereoRight = _primaryPreferredStereoRightChannel
-            eqProc = dspBypass ? nil : eqProcessor
-            autoEQProc = dspBypass ? nil : autoEQProcessor
-            loudnessEqualizerProc = dspBypass ? nil : loudnessEqualizerProcessor
-            loudnessCompensatorProc = dspBypass ? nil : loudnessCompensator
-        } else {
-            currentVol = _secondaryCurrentVolume
-            // Secondary uses sine curve (0→1).
-            // .warmingUp → 0.0 (muted), .crossfading → sin(progress*π/2), .idle → 1.0
-            crossfadeMultiplier = crossfadeState.secondaryMultiplier
-            rampCoeff = secondaryRampCoefficient
-            stereoLeft = _secondaryPreferredStereoLeftChannel
-            stereoRight = _secondaryPreferredStereoRightChannel
-            eqProc = dspBypass ? nil : secondaryEQProcessor
-            autoEQProc = dspBypass ? nil : secondaryAutoEQProcessor
-            loudnessEqualizerProc = dspBypass ? nil : secondaryLoudnessEqualizerProcessor
-            loudnessCompensatorProc = dspBypass ? nil : secondaryLoudnessCompensator
-        }
-
-        Self.processMappedBuffers(
-            inputBuffers: inputBuffers,
-            outputBuffers: outputBuffers,
-            targetVol: targetVol,
-            crossfadeMultiplier: crossfadeMultiplier,
-            rampCoefficient: rampCoeff,
-            preferredStereoLeft: stereoLeft,
-            preferredStereoRight: stereoRight,
-            currentVol: &currentVol,
-            eqProc: eqProc,
-            autoEQProc: autoEQProc,
-            loudnessEqualizerProc: loudnessEqualizerProc,
-            loudnessCompensatorProc: loudnessCompensatorProc
-        )
-
-        if isPrimary {
-            _primaryCurrentVolume = currentVol
-        } else {
-            _secondaryCurrentVolume = currentVol
-        }
+    func renderContextForTesting() -> TapRenderContext? { testContext }
+    func processAudioCallback(_ input: UnsafePointer<AudioBufferList>, to output: UnsafeMutablePointer<AudioBufferList>, callbackID: UInt32, timing: RenderTimingState? = nil) {
+        if let context = testContext, context.id == callbackID, callbackID != 0 { context.process(input, to: output) }
+        else { for buffer in UnsafeMutableAudioBufferListPointer(output) { if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) } } }
     }
 }

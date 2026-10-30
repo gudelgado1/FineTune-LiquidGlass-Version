@@ -81,6 +81,7 @@ extension AudioEngine {
         )
         settingsManager.ignoreApp(app.persistenceIdentifier, info: info)
 
+        cancelPendingCreation(for: app.id)
         // Tear down the live tap so audio returns to natural volume
         if let tap = taps.removeValue(forKey: app.id) {
             tap.invalidate()
@@ -217,6 +218,7 @@ extension AudioEngine {
                         .sorted()  // Deterministic ordering
                     if !availableUIDs.isEmpty {
                         logger.debug("Restoring multi-device mode for \(app.name) with \(availableUIDs.count) device(s)")
+                        if pidsBeingCreated.contains(app.id) || pidsBeingRecreated.contains(app.id), taps[app.id]?.currentDeviceUIDs != availableUIDs { cancelPendingCreation(for: app.id) }
                         if let tap = taps[app.id], tap.currentDeviceUIDs != availableUIDs {
                             let source = preferredTapSourceDeviceUID(forOutputUIDs: availableUIDs, isFollowsDefault: false)
                             Task {
@@ -283,6 +285,7 @@ extension AudioEngine {
                 logger.debug("App \(app.name) device temporarily unavailable, using default: \(deviceUID)")
             }
             appDeviceRouting[app.id] = deviceUID
+            if pidsBeingCreated.contains(app.id) || pidsBeingRecreated.contains(app.id), taps[app.id]?.currentDeviceUIDs != [deviceUID] { cancelPendingCreation(for: app.id) }
 
             // If a tap already exists but is on the wrong device (e.g., app reappeared
             // after the default changed while it was absent), switch it.

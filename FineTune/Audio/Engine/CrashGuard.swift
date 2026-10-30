@@ -10,7 +10,7 @@ import os
 private nonisolated(unsafe) var gDeviceSlots: UnsafeMutablePointer<AudioObjectID>?
 private nonisolated(unsafe) var gDeviceCount: Int32 = 0
 private nonisolated(unsafe) var gDeviceLock = os_unfair_lock()
-private let gMaxDeviceSlots = 128
+nonisolated private let gMaxDeviceSlots = 128
 
 // MARK: - Crash Signal Handler
 
@@ -51,7 +51,7 @@ private func crashSignalHandler(_ sig: Int32) {
     raise(sig)
 }
 
-private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "CrashGuard")
+nonisolated private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "CrashGuard")
 
 // MARK: - Public API
 
@@ -81,7 +81,7 @@ enum CrashGuard {
 
     /// Registers an aggregate device for crash-safe cleanup.
     /// Call immediately after successful `AudioHardwareCreateAggregateDevice`.
-    static func trackDevice(_ deviceID: AudioObjectID) {
+    nonisolated static func trackDevice(_ deviceID: AudioObjectID) {
         os_unfair_lock_lock(&gDeviceLock)
         guard let slots = gDeviceSlots else {
             os_unfair_lock_unlock(&gDeviceLock)
@@ -100,7 +100,7 @@ enum CrashGuard {
 
     /// Removes an aggregate device from crash-safe tracking.
     /// Call immediately before `AudioHardwareDestroyAggregateDevice`.
-    static func untrackDevice(_ deviceID: AudioObjectID) {
+    nonisolated static func untrackDevice(_ deviceID: AudioObjectID) {
         os_unfair_lock_lock(&gDeviceLock)
         defer { os_unfair_lock_unlock(&gDeviceLock) }
         guard let slots = gDeviceSlots else { return }

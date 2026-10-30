@@ -2,7 +2,7 @@ import Foundation
 
 /// Audio EQ Cookbook biquad coefficient calculations
 /// Reference: Robert Bristow-Johnson's Audio EQ Cookbook
-enum BiquadMath {
+nonisolated enum BiquadMath {
     /// Standard Q for graphic EQ (overlapping bands)
     static let graphicEQQ: Double = 1.4
 

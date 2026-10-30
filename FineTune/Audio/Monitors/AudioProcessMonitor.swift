@@ -68,7 +68,7 @@ nonisolated final class AudioProcessListenerRegistration: Sendable {
                 state.registered = true
                 return false
             }
-            if needsRemoval { _ = remove() }
+            if needsRemoval { HALListenerRetirement.enqueue(remove) }
         }
         return status
     }
@@ -82,9 +82,7 @@ nonisolated final class AudioProcessListenerRegistration: Sendable {
         }
         if needsRemoval {
             let remove = self.remove
-            Task {
-                _ = await HALExecutor.run(timeout: 4.0, remove)
-            }
+            HALListenerRetirement.enqueue(remove)
         }
     }
 }

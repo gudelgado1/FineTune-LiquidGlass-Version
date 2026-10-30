@@ -45,6 +45,17 @@ jobs:
           python3 scripts/run-dsp-checks.py --sanitizer address \
             --build-dir build/ci/dsp-address \
             --atomics-path build/ci/SourcePackages/checkouts/swift-atomics > build/ci/dsp-address.log 2>&1
+      - name: Check native capture lifecycle with Thread Sanitizer
+        run: |
+          python3 scripts/run-tests.py --sanitizer thread \
+            --build-dir build/ci/native-tsan --packages-dir build/ci/SourcePackages \
+            --only FineTuneTests/ProcessTapCallbackHealthTests \
+            --only FineTuneTests/TapLifecycleIntegrationTests \
+            --only FineTuneTests/EnginePendingCaptureTests \
+            --only FineTuneTests/TapHALFailureTests \
+            --only FineTuneTests/HALRetirementQueueTests \
+            --only FineTuneTests/OwnedHALExecutorTests \
+            --only FineTuneTests/RealtimeSnapshotTests
       - name: Build optimized Release
         run: |
           xcodebuild build \
@@ -61,6 +72,7 @@ jobs:
           name: finetune-validation-${{ github.run_id }}
           path: |
             build/ci/runs/
+            build/ci/native-tsan/runs/
             build/ci/release.log
             build/ci/dsp-thread.log
             build/ci/dsp-address.log

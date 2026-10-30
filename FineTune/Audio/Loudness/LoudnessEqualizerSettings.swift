@@ -3,7 +3,7 @@
 // momentary loudness metering; the pumping itself is cured by the slower gain
 // release. Lower max boost and a higher noise floor keep quiet passages from
 // being dragged up.
-struct LoudnessEqualizerSettings: Codable, Equatable, Sendable {
+nonisolated struct LoudnessEqualizerSettings: Codable, Equatable, Sendable {
     var targetLoudnessDb: Float = -12
     var maxBoostDb: Float = 6
     var maxCutDb: Float = 4

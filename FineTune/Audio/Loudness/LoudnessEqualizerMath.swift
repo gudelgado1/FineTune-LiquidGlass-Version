@@ -1,6 +1,6 @@
 import Foundation
 
-enum LoudnessEqualizerMath {
+nonisolated enum LoudnessEqualizerMath {
     static func dbToLinear(_ db: Float) -> Float {
         pow(10, db / 20)
     }

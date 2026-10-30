@@ -34,7 +34,7 @@ enum CrossfadeError: LocalizedError {
 /// Picking the right profile avoids two failure modes:
 ///   * Crossfade too short → audible click or partial silence on slow devices
 ///   * Crossfade too long → switches feel sluggish on fast devices
-struct CrossfadeProfile: Sendable {
+nonisolated struct CrossfadeProfile: Sendable {
     /// Equal-power fade duration in seconds. Wall-clock time the secondary
     /// callback takes to ramp from 0→1 while primary ramps 1→0.
     let crossfadeDuration: TimeInterval

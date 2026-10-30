@@ -44,6 +44,24 @@ struct RealtimeSnapshotTests {
         #expect(snapshot.withValue { $0 } == 9_999)
     }
 
+    @Test("Swift processor owner stays pinned until the next callback entry")
+    func swiftOwnerGraceEndsAtNextRead() {
+        var owner: SnapshotTestOwner? = SnapshotTestOwner()
+        weak var weakOwner: SnapshotTestOwner?
+        weakOwner = owner
+        let snapshot = RealtimeSnapshot(1, owner: owner, keepLastReadAlive: true)
+        owner = nil
+        #expect(snapshot.withValue { $0 } == 1)
+        for index in 2..<1000 { snapshot.publish(index) }
+        snapshot.collectRetired()
+        #expect(weakOwner != nil)
+        #expect(snapshot.retainedStorageCount == 2)
+        #expect(snapshot.withValue { $0 } == 999)
+        snapshot.collectRetired()
+        #expect(weakOwner == nil)
+        #expect(snapshot.retainedStorageCount == 1)
+    }
+
     @Test("real vDSP render overlaps EQ enable, coefficient and reset changes")
     func concurrentEQRenderAndUpdates() {
         let processor = EQProcessor(sampleRate: 48_000)

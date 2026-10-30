@@ -12,7 +12,7 @@ import Accelerate
 ///
 /// Subclass of `BiquadProcessor` — inherits atomic setup swaps, stereo biquad processing,
 /// delay buffer management, and NaN safety. Follows the same pattern as `EQProcessor`.
-final class LoudnessCompensator: BiquadProcessor, @unchecked Sendable {
+nonisolated final class LoudnessCompensator: BiquadProcessor, @unchecked Sendable {
 
     // MARK: - Configuration
 
