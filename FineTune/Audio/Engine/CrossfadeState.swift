@@ -1,140 +1,124 @@
-// FineTune/Audio/Engine/CrossfadeState.swift
+import Atomics
 import Foundation
 
-/// State machine phases for device switching crossfade.
 enum CrossfadePhase: Int, Equatable {
-    case idle = 0
-    case warmingUp = 1
-    case crossfading = 2
+    case idle = 0, warmingUp = 1, crossfading = 2
 }
 
-/// RT-safe crossfade state container.
-/// All fields are designed for lock-free access from audio callbacks.
-///
-/// **Threading model:**
-/// - Main thread writes via `beginWarmup()`, `beginCrossfading()`, `complete()`
-/// - Secondary audio callback writes via `updateProgress(samples:)` (single-writer)
-/// - Both audio callbacks read `phase`, `primaryMultiplier`, `secondaryMultiplier`
-///
-/// **Memory ordering:** Uses aligned Float/Int reads which are atomic on Apple platforms
-/// (ARM64/x86-64). `OSMemoryBarrier()` ensures cross-core visibility at phase transitions.
-struct CrossfadeState: @unchecked Sendable {
-    /// Current crossfade progress (0 = full primary, 1 = full secondary)
-    nonisolated(unsafe) var progress: Float = 0
+/// Control + one secondary render writer, any number of readers. One atomic
+/// double-word publishes phase/progress/counters together. Transitions advance
+/// a generation so a preempted callback cannot commit into a newer phase.
+/// No allocations/locks in updateProgress or multiplier reads. Counter storage
+/// saturates at UInt32.max (~24h at 48kHz); crossfades use milliseconds.
+nonisolated final class CrossfadeState: Sendable {
+    // first: progress Float bits (32), phase (2), generation (30).
+    // second: total secondary frames (32), crossfade frames (32).
+    private let state = ManagedAtomic(DoubleWord(first: 0, second: 0))
+    private let duration = ManagedAtomic<Int64>(0)
+    private static let mask: UInt = 0xffff_ffff
+    private static let generationMask: UInt = 0x3fff_ffff
+    static let minimumWarmupSamples = 2048
 
-    /// RT-safe phase storage (Int for atomic reads on audio thread)
-    nonisolated(unsafe) private var _phaseRawValue: Int = 0
-
-    /// Current crossfade phase
-    var phase: CrossfadePhase {
-        get { CrossfadePhase(rawValue: _phaseRawValue) ?? .idle }
-        set { _phaseRawValue = newValue.rawValue }
+    var generation: UInt { state.load(ordering: .acquiring).first >> 34 }
+    var phase: CrossfadePhase { Self.phase(of: state.load(ordering: .acquiring)) }
+    var isActive: Bool { phase != .idle }
+    var secondarySamplesProcessed: Int { Int(state.load(ordering: .acquiring).second & Self.mask) }
+    var secondarySampleCount: Int64 { Int64(state.load(ordering: .acquiring).second >> 32) }
+    var totalSamples: Int64 {
+        get { duration.load(ordering: .relaxed) }
+        set { duration.store(max(0, min(Int64(UInt32.max), newValue)), ordering: .relaxed) }
     }
-
-    /// Backward-compatible: true when warmingUp OR crossfading
-    var isActive: Bool {
-        _phaseRawValue != CrossfadePhase.idle.rawValue
-    }
-
-    /// Sample count from secondary callback (drives crossfade timing)
-    nonisolated(unsafe) var secondarySampleCount: Int64 = 0
-
-    /// Total samples for the crossfade duration
-    nonisolated(unsafe) var totalSamples: Int64 = 0
-
-    /// Samples processed by secondary (for warmup tracking)
-    nonisolated(unsafe) var secondarySamplesProcessed: Int = 0
-
-    /// Minimum samples secondary must process before destroying primary
-    static let minimumWarmupSamples: Int = 2048  // ~43ms at 48kHz
-
-    init() {}
-
-    // MARK: - Phase Transitions (called from main thread)
-
-    /// Resets all state and enters warmingUp phase without setting totalSamples.
-    /// Call before secondary tap creation so audio callbacks see correct phase.
-    /// Set `totalSamples` separately after reading the new device's sample rate.
-    mutating func beginWarmup() {
-        progress = 0
-        secondarySampleCount = 0
-        secondarySamplesProcessed = 0
-        totalSamples = 0
-        OSMemoryBarrier()    // Flush data stores before publishing phase
-        phase = .warmingUp
-    }
-
-    /// Transitions from warmingUp to crossfading.
-    /// Call after warmup is confirmed (secondary has processed enough samples).
-    mutating func beginCrossfading() {
-        secondarySampleCount = 0
-        progress = 0
-        OSMemoryBarrier()    // Flush data stores before publishing phase
-        phase = .crossfading
-    }
-
-    /// Completes the crossfade and resets all state to idle.
-    mutating func complete() {
-        progress = 0
-        secondarySampleCount = 0
-        secondarySamplesProcessed = 0
-        totalSamples = 0
-        OSMemoryBarrier()    // Flush data stores before publishing phase
-        phase = .idle
-    }
-
-    // MARK: - Audio Thread Access
-
-    /// Updates progress based on samples processed.
-    /// **Called only from the secondary audio callback** (single-writer pattern).
-    ///
-    /// - Parameter samples: Number of samples just processed this buffer
-    /// - Returns: New progress value (0.0 to 1.0)
-    @inline(__always)
-    mutating func updateProgress(samples: Int) -> Float {
-        secondarySamplesProcessed += samples
-        if phase == .crossfading {
-            secondarySampleCount += Int64(samples)
-            progress = min(1.0, Float(secondarySampleCount) / Float(max(1, totalSamples)))
+    var progress: Float {
+        get { Self.progress(of: state.load(ordering: .acquiring)) }
+        set {
+            let value = newValue.isFinite ? max(0, min(1, newValue)) : 0
+            mutate { old in
+                DoubleWord(first: Self.header(progress: value, phase: Self.phase(of: old), generation: (old.first >> 34) &+ 1), second: old.second)
+            }
         }
-        return progress
     }
 
-    /// Checks if warmup is complete (enough samples processed by secondary)
-    var isWarmupComplete: Bool {
-        secondarySamplesProcessed >= Self.minimumWarmupSamples
+    func beginWarmup() {
+        transition(to: .warmingUp, preserveWarmup: false)
+        totalSamples = 0 // no fade calculation while warming up
+    }
+    func beginCrossfading() { transition(to: .crossfading, preserveWarmup: true) }
+    func complete() {
+        transition(to: .idle, preserveWarmup: false)
+        totalSamples = 0
+    }
+    private func transition(to phase: CrossfadePhase, preserveWarmup: Bool) {
+        mutate { old in
+            DoubleWord(first: Self.header(progress: 0, phase: phase, generation: (old.first >> 34) &+ 1),
+                       second: preserveWarmup ? old.second & Self.mask : 0)
+        }
     }
 
-    /// Checks if the crossfade animation is complete (progress reached 1.0)
-    var isCrossfadeComplete: Bool {
-        progress >= 1.0
-    }
-
-    /// Equal-power fade-out multiplier for primary tap.
-    /// cos(0) = 1.0 (full volume), cos(pi/2) = 0.0 (silent)
     @inline(__always)
+    func updateProgress(samples: Int, generation expectedGeneration: UInt? = nil) -> Float {
+        var old = state.load(ordering: .acquiring)
+        let epoch = expectedGeneration ?? (old.first >> 34)
+        guard samples > 0 else { return Self.progress(of: old) }
+        while true {
+            guard old.first >> 34 == epoch else { return Self.progress(of: old) }
+            let warm = min(Self.mask, (old.second & Self.mask) + UInt(min(samples, Int(UInt32.max))))
+            var count = old.second >> 32
+            var progress = Self.progress(of: old)
+            if Self.phase(of: old) == .crossfading {
+                count = min(Self.mask, count + UInt(min(samples, Int(UInt32.max))))
+                progress = max(progress, min(1, Float(count) / Float(max(1, totalSamples))))
+            }
+            let next = DoubleWord(first: Self.header(progress: progress, phase: Self.phase(of: old), generation: epoch),
+                                  second: warm | (count << 32))
+            let result = state.compareExchange(expected: old, desired: next, ordering: .acquiringAndReleasing)
+            if result.exchanged { return progress }
+            old = result.original
+        }
+    }
+    var isWarmupComplete: Bool { secondarySamplesProcessed >= Self.minimumWarmupSamples }
+    var isCrossfadeComplete: Bool { progress >= 1 }
+
+    /// Uses actual rendered frames, not elapsed sleep, as readiness evidence.
+    @MainActor
+    func waitForWarmup(timeout: Duration) async throws -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !isWarmupComplete {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { return false }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try Task.checkCancellation()
+        return true
+    }
+
     var primaryMultiplier: Float {
-        switch phase {
-        case .idle:
-            return progress >= 1.0 ? 0.0 : 1.0
-        case .warmingUp:
-            return 1.0
-        case .crossfading:
-            return cos(progress * .pi / 2.0)
+        let value = state.load(ordering: .acquiring)
+        let progress = Self.progress(of: value)
+        switch Self.phase(of: value) {
+        case .idle: return progress >= 1 ? 0 : 1
+        case .warmingUp: return 1
+        case .crossfading: return progress >= 1 ? 0 : cos(progress * .pi / 2)
         }
     }
-
-    /// Equal-power fade-in multiplier for secondary tap.
-    /// sin(0) = 0.0 (silent), sin(pi/2) = 1.0 (full volume)
-    @inline(__always)
     var secondaryMultiplier: Float {
-        switch phase {
-        case .idle:
-            return 1.0  // After promotion, full volume
-        case .warmingUp:
-            return 0.0  // Muted during warmup
-        case .crossfading:
-            return sin(progress * .pi / 2.0)
+        let value = state.load(ordering: .acquiring)
+        switch Self.phase(of: value) {
+        case .idle: return 1
+        case .warmingUp: return 0
+        case .crossfading: return sin(Self.progress(of: value) * .pi / 2)
         }
     }
+    private func mutate(_ transform: (DoubleWord) -> DoubleWord) {
+        var old = state.load(ordering: .acquiring)
+        while true {
+            let result = state.compareExchange(expected: old, desired: transform(old), ordering: .acquiringAndReleasing)
+            if result.exchanged { return }
+            old = result.original
+        }
+    }
+    private static func header(progress: Float, phase: CrossfadePhase, generation: UInt) -> UInt {
+        UInt(progress.bitPattern) | UInt(phase.rawValue) << 32 | (generation & generationMask) << 34
+    }
+    private static func progress(of value: DoubleWord) -> Float { Float(bitPattern: UInt32(truncatingIfNeeded: value.first)) }
+    private static func phase(of value: DoubleWord) -> CrossfadePhase { CrossfadePhase(rawValue: Int((value.first >> 32) & 3)) ?? .idle }
 }

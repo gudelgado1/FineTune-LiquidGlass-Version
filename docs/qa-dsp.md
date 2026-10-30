@@ -47,3 +47,25 @@ still has shared scalar/reference fields, crossfade transitions, and timed
 retirement of some processor objects outside BiquadProcessor. Other paths still
 make synchronous HAL calls. Hardware QA must cover playback, mute, device changes,
 sleep/wake, multi-output, long sessions and pressure before a release.
+
+Crossfade checks now run in the same sanitizer harness. `CrossfadeState` publishes
+phase, progress and saturated counters in one atomic double-word; a phase change
+advances a generation, rejecting progress from a preempted older callback. The
+payload has 30 generation bits and two 32-bit frame counters. This is intended for
+millisecond fades; totalSamples saturates at UInt32.max. A phase/progress update
+uses CAS retries and is lock-free, not wait-free.
+
+`DeviceTransitionCoordinator` owns control-side transition tasks. A replacement
+cancels and awaits its predecessor, including deferred cleanup. Cancellation of
+the caller cancels its task too; obsolete work cannot return success even if it
+swallows CancellationError. Crossfade, destructive switching and source refresh
+all use this same coordinator. It cannot interrupt a blocked synchronous HAL call.
+
+A secondary must pass the transport settling interval and render at least 2048
+frames before the fade. A fade that stops progressing fails into the existing
+destructive fallback; timeouts no longer manufacture progress=1. The independent
+AutoEQ copy preserves the primary's preamp mode at the new device rate.
+
+Use `--filter SuiteName` with run-dsp-checks.py for a focused regression run.
+The full pipeline/reference lifetime and HAL migration remain described in
+[qa-hal-lifecycle.md](qa-hal-lifecycle.md).

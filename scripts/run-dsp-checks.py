@@ -14,9 +14,11 @@ SOURCES = [
     'Audio/EQ/BiquadProcessor.swift', 'Audio/EQ/EQProcessor.swift',
     'Audio/AutoEQ/AutoEQProcessor.swift', 'Audio/Loudness/LoudnessCompensator.swift',
     'Audio/Loudness/ISO226Contours.swift', 'Audio/Engine/SoftLimiter.swift',
+    'Audio/Engine/CrossfadeState.swift', 'Audio/Engine/DeviceTransitionCoordinator.swift',
     'Models/EQSettings.swift', 'Models/AutoEQProfile.swift',
 ]
 TESTS = [
+    'CrossfadeReadinessTests.swift', 'DeviceTransitionCoordinatorTests.swift', 'CrossfadeConcurrencyTests.swift', 'CrossfadeStateAdversarialTests.swift',
     'RealtimeSnapshotTests.swift', 'HALWorkerPoolTests.swift',
     'BiquadProcessorSignalTests.swift', 'BiquadProcessorSignalAdversarialTests.swift',
 ]
@@ -27,6 +29,7 @@ def main():
     parser.add_argument('--sanitizer', choices=['thread', 'address'], required=True)
     parser.add_argument('--build-dir', type=Path)
     parser.add_argument('--atomics-path', type=Path, help='optional local Swift Atomics checkout')
+    parser.add_argument('--filter', help='optional Swift Testing suite/test filter')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     root = (args.build_dir or repo / 'build/dsp-checks' / args.sanitizer).resolve()
@@ -60,6 +63,7 @@ let package = Package(name: "FineTuneDSPChecks", platforms: [.macOS("14.2")],
     env.setdefault('DEVELOPER_DIR', '/Applications/Xcode.app/Contents/Developer')
     command = ['/usr/bin/xcrun', 'swift', 'test', '--package-path', str(package),
                '--scratch-path', str(root / 'build'), '--sanitize', args.sanitizer]
+    if args.filter: command += ['--filter', args.filter]
     print(' '.join(command), flush=True)
     result = subprocess.run(command, env=env)
     raise SystemExit(result.returncode)

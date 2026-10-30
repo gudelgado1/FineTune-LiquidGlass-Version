@@ -69,6 +69,14 @@ final class AutoEQProcessor: BiquadProcessor, @unchecked Sendable {
         // coefficients using existing state, producing smooth transitions without clicks.
     }
 
+    /// Independent delay state for a new render clock during device switching.
+    func makeCopy(sampleRate: Double) -> AutoEQProcessor {
+        let copy = AutoEQProcessor(sampleRate: sampleRate)
+        copy.setPreampEnabled(_preampEnabled)
+        copy.updateProfile(_currentProfile)
+        return copy
+    }
+
     // MARK: - Preamp Mode
 
     /// Toggle profile preamp on/off. When off, relies on downstream limiter for peak control.

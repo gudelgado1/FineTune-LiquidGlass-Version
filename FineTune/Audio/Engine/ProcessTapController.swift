@@ -1,6 +1,7 @@
 // FineTune/Audio/Engine/ProcessTapController.swift
 import Accelerate    // vDSP for SIMD peak detection
 import AudioToolbox
+import Atomics
 import Foundation
 import os
 
@@ -19,8 +20,9 @@ import os
 //      _primaryCurrentVolume/_secondaryCurrentVolume, _lastRenderHostTime, _hasRenderedAudio
 //    - MUST NOT allocate, lock, log, or call ObjC (real-time safety).
 //
-// The nonisolated(unsafe) annotation marks variables that cross the thread boundary.
-// Aligned Float32/Bool/Int reads/writes are atomic on Apple ARM64/x86-64.
+// Crossfade state and callback role IDs use explicit atomics. Remaining unsafe
+// fields below still need synchronization/lifetime review; alignment and
+// nonisolated(unsafe) do not establish Swift memory-model safety.
 
 final class ProcessTapController: ProcessTapControlling {
     let app: AudioApp
@@ -42,9 +44,8 @@ final class ProcessTapController: ProcessTapControlling {
     // MARK: - RT-Safe State (nonisolated(unsafe) for lock-free audio thread access)
     //
     // These variables are accessed from CoreAudio's real-time thread without locks.
-    // SAFETY: Aligned Float32/Bool reads/writes are atomic on Apple ARM/Intel platforms.
-    // The audio callback reads these values; the main thread writes them.
-    // No lock is needed because single-word aligned loads/stores are atomic.
+    // Some legacy scalar/reference exchanges remain unsynchronized. They are
+    // deliberately listed here for the remaining callback ownership migration.
 
     /// Target gain set by AudioEngine (volume × boost). Range 0.0-4.0 (1.0 = unity, 4.0 = +12dB).
     private nonisolated(unsafe) var _volume: Float = 1.0
@@ -101,8 +102,25 @@ final class ProcessTapController: ProcessTapControlling {
     /// The callback compares against these to determine primary/secondary role.
     /// After promotion, _primaryCallbackID is reassigned so the promoted callback
     /// seamlessly switches to primary-role behavior on its next invocation.
-    private nonisolated(unsafe) var _primaryCallbackID: UInt32 = 0
-    private nonisolated(unsafe) var _secondaryCallbackID: UInt32 = 0
+    private let callbackIDs = ManagedAtomic<UInt64>(0)
+    private var _primaryCallbackID: UInt32 {
+        get { UInt32(truncatingIfNeeded: callbackIDs.load(ordering: .acquiring)) }
+        set { setCallbackID(newValue, secondary: false) }
+    }
+    private var _secondaryCallbackID: UInt32 {
+        get { UInt32(truncatingIfNeeded: callbackIDs.load(ordering: .acquiring) >> 32) }
+        set { setCallbackID(newValue, secondary: true) }
+    }
+    private func setCallbackID(_ value: UInt32, secondary: Bool) {
+        var old = callbackIDs.load(ordering: .acquiring)
+        while true {
+            let next = secondary ? (old & 0xffff_ffff) | UInt64(value) << 32
+                : (old & 0xffff_ffff_0000_0000) | UInt64(value)
+            let result = callbackIDs.compareExchange(expected: old, desired: next, ordering: .acquiringAndReleasing)
+            if result.exchanged { return }
+            old = result.original
+        }
+    }
     /// Monotonic counter for unique callback IDs. Only written from main thread.
     private var nextCallbackID: UInt32 = 0
 
@@ -112,7 +130,7 @@ final class ProcessTapController: ProcessTapControlling {
     /// - Secondary uses sin(progress * π/2) → fades from 0.0 to 1.0
     /// This "equal power" crossfade maintains perceived loudness throughout the transition.
     /// See CrossfadeState for phase machine details.
-    private nonisolated(unsafe) var crossfadeState = CrossfadeState()
+    private let crossfadeState = CrossfadeState()
 
     // MARK: - Non-RT State (modified only from main thread)
 
@@ -183,8 +201,8 @@ final class ProcessTapController: ProcessTapControlling {
 
     /// Guard against re-entrant crossfade (ORCH-001)
     private var isSwitching = false
-    /// Cancellable crossfade task — cancelled when a new switch starts
-    private var crossfadeTask: Task<Void, Error>?
+    /// Serializes crossfade, source refresh and destructive fallback cleanup.
+    private let deviceTransition = DeviceTransitionCoordinator()
     private var didLogEQBypassForMultichannel = false
 
     // MARK: - Public Properties
@@ -751,87 +769,50 @@ final class ProcessTapController: ProcessTapControlling {
     ///   (the source device is disconnected, so there's no audio to blend from).
     func updateDevices(to newDeviceUIDs: [String], preferredTapSourceDeviceUID: String? = nil, sourceDeviceDead: Bool = false) async throws {
         precondition(!newDeviceUIDs.isEmpty, "Must have at least one target device")
-        self.preferredTapSourceDeviceUID = preferredTapSourceDeviceUID
-
         guard activated else {
+            self.preferredTapSourceDeviceUID = preferredTapSourceDeviceUID
             targetDeviceUIDs = newDeviceUIDs
             return
         }
-
-        guard newDeviceUIDs != currentDeviceUIDs else { return }
-
-        let startTime = CFAbsoluteTimeGetCurrent()
-        logger.info("[UPDATE] Switching \(self.app.name) to \(newDeviceUIDs.count) device(s)\(sourceDeviceDead ? " (source dead)" : "")")
-
-        // For now, crossfade uses the first (primary) device
-        // All devices in the aggregate will be included
-        let primaryDeviceUID = newDeviceUIDs[0]
-
-        if sourceDeviceDead {
-            // Source device is disconnected — no audio to crossfade from.
-            // Go straight to destructive switch with shortened settle time.
-            guard primaryResources.tapDescription != nil else {
-                throw CrossfadeError.noTapDescription
-            }
-            try await performDestructiveDeviceSwitch(to: primaryDeviceUID, allDeviceUIDs: newDeviceUIDs, sourceAlreadySilent: true)
-        } else {
-            crossfadeTask?.cancel()
-            crossfadeTask = Task {
-                try await performCrossfadeSwitch(to: primaryDeviceUID, allDeviceUIDs: newDeviceUIDs)
-            }
-            do {
-                try await crossfadeTask!.value
-            } catch is CancellationError {
-                logger.info("[UPDATE] Crossfade cancelled by invalidate()")
-                return
-            } catch {
-                logger.warning("[UPDATE] Crossfade failed: \(error.localizedDescription), using fallback")
-                guard primaryResources.tapDescription != nil else {
-                    throw CrossfadeError.noTapDescription
-                }
-                try await performDestructiveDeviceSwitch(to: primaryDeviceUID, allDeviceUIDs: newDeviceUIDs)
-            }
-            crossfadeTask = nil
+        try await deviceTransition.run { [self] in
+            guard activated, !_invalidating else { throw CancellationError() }
+            // Check after predecessor cleanup: returning to the current route
+            // must still cancel a different route that was being prepared.
+            self.preferredTapSourceDeviceUID = preferredTapSourceDeviceUID
+            guard newDeviceUIDs != currentDeviceUIDs else { return }
+            try await switchPreparedDevices(to: newDeviceUIDs, sourceDeviceDead: sourceDeviceDead)
+            try Task.checkCancellation()
+            targetDeviceUIDs = newDeviceUIDs
+            currentDeviceUIDs = newDeviceUIDs
         }
-
-        targetDeviceUIDs = newDeviceUIDs
-        currentDeviceUIDs = newDeviceUIDs
-
-        let endTime = CFAbsoluteTimeGetCurrent()
-        logger.info("[UPDATE] === END === Total time: \((endTime - startTime) * 1000)ms")
     }
 
-    /// Refreshes the process tap source (stream-specific ↔ stereo mixdown) without changing
-    /// the output device. Used when the system default changes and an explicitly-routed app's
-    /// stream-specific tap becomes stale (captures silence on the old default's stream).
-    func refreshTapSource(_ preferredDeviceUID: String?) async throws {
-        let oldPreferred = self.preferredTapSourceDeviceUID
-        self.preferredTapSourceDeviceUID = preferredDeviceUID
-        guard activated, let primaryUID = currentDeviceUIDs.first else { return }
-        guard oldPreferred != preferredDeviceUID else { return }
-
-        let allUIDs = currentDeviceUIDs
-        logger.info("[REFRESH] Tap source changing for \(self.app.name): \(oldPreferred ?? "mixdown") → \(preferredDeviceUID ?? "mixdown")")
-
-        crossfadeTask?.cancel()
-        crossfadeTask = Task {
-            try await performCrossfadeSwitch(to: primaryUID, allDeviceUIDs: allUIDs)
-        }
-        do {
-            try await crossfadeTask!.value
-        } catch is CancellationError {
-            logger.info("[REFRESH] Tap source refresh cancelled")
-            return
-        } catch {
-            logger.warning("[REFRESH] Crossfade failed, using destructive switch: \(error.localizedDescription)")
-            guard primaryResources.tapDescription != nil else {
-                throw CrossfadeError.noTapDescription
+    private func switchPreparedDevices(to deviceUIDs: [String], sourceDeviceDead: Bool) async throws {
+        guard let primaryUID = deviceUIDs.first else { return }
+        if sourceDeviceDead {
+            guard primaryResources.tapDescription != nil else { throw CrossfadeError.noTapDescription }
+            try await performDestructiveDeviceSwitch(to: primaryUID, allDeviceUIDs: deviceUIDs, sourceAlreadySilent: true)
+        } else {
+            do {
+                try await performCrossfadeSwitch(to: primaryUID, allDeviceUIDs: deviceUIDs)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                guard activated, primaryResources.tapDescription != nil else { throw CrossfadeError.noTapDescription }
+                logger.warning("Crossfade failed: \(error.localizedDescription), using destructive fallback")
+                try await performDestructiveDeviceSwitch(to: primaryUID, allDeviceUIDs: deviceUIDs)
             }
-            try await performDestructiveDeviceSwitch(to: primaryUID, allDeviceUIDs: allUIDs)
         }
-        crossfadeTask = nil
+    }
 
-        logger.info("[REFRESH] Tap source refresh complete for \(self.app.name)")
+    func refreshTapSource(_ preferredDeviceUID: String?) async throws {
+        try await deviceTransition.run { [self] in
+            guard activated, !_invalidating, !currentDeviceUIDs.isEmpty else { throw CancellationError() }
+            guard preferredTapSourceDeviceUID != preferredDeviceUID else { return }
+            preferredTapSourceDeviceUID = preferredDeviceUID
+            try await switchPreparedDevices(to: currentDeviceUIDs, sourceDeviceDead: false)
+        }
     }
 
     /// Tears down the tap and releases all CoreAudio resources.
@@ -885,14 +866,12 @@ final class ProcessTapController: ProcessTapControlling {
         renderClock = nil
         secondaryRenderClock = nil
 
-        crossfadeTask?.cancel()
-        crossfadeTask = nil
+        deviceTransition.cancel()
 
         logger.debug("Invalidating tap for \(self.app.name)")
 
         crossfadeState.complete()
-        _primaryCallbackID = 0
-        _secondaryCallbackID = 0
+        callbackIDs.store(0, ordering: .releasing)
 
         return true
     }
@@ -915,12 +894,8 @@ final class ProcessTapController: ProcessTapControlling {
     private func performCrossfadeSwitch(to primaryDeviceUID: String, allDeviceUIDs: [String]? = nil) async throws {
         let deviceUIDs = allDeviceUIDs ?? [primaryDeviceUID]
 
-        // Re-entrant guard (ORCH-001): if already switching, tear down in-progress secondary
-        if isSwitching {
-            logger.warning("[CROSSFADE] Re-entrant switch detected — tearing down in-progress secondary")
-            cleanupSecondaryTap()
-            crossfadeState.complete()
-        }
+        // The coordinator awaits predecessor cleanup before entering here.
+        precondition(!isSwitching, "Device transitions must be serialized")
         isSwitching = true
         defer { isSwitching = false }
 
@@ -940,8 +915,6 @@ final class ProcessTapController: ProcessTapControlling {
         crossfadeState.beginWarmup()
 
         logger.info("[CROSSFADE] Step 3: Creating secondary tap for \(deviceUIDs.count) device(s)")
-        try createSecondaryTap(for: deviceUIDs, profile: profile)
-
         // LIFE-004/005: Ensure secondary tap is cleaned up if crossfade fails or is cancelled
         var crossfadeCompleted = false
         defer {
@@ -952,11 +925,18 @@ final class ProcessTapController: ProcessTapControlling {
             }
         }
 
+        try createSecondaryTap(for: deviceUIDs, profile: profile)
+
         let warmupMs = profile.warmupMs
         logger.info("[CROSSFADE] Step 4: Waiting for secondary tap warmup (\(warmupMs)ms)...")
-        try await Task.sleep(for: .milliseconds(UInt64(warmupMs)))
+        // Preserve transport settling time (notably Bluetooth) as well as
+        // requiring real callback evidence before the audible fade starts.
+        try await Task.sleep(for: .milliseconds(warmupMs))
+        guard try await crossfadeState.waitForWarmup(timeout: .milliseconds(profile.timeoutExtraMs)) else {
+            throw CrossfadeError.secondaryTapFailed
+        }
 
-        // Transition to crossfading phase now that warmup sleep has elapsed
+        // Warmup duration and callback evidence are both satisfied.
         crossfadeState.beginCrossfading()
         let crossfadeMs = CrossfadeConfig.duration(for: profile) * 1000
         logger.info("[CROSSFADE] Step 5: Crossfade in progress (\(crossfadeMs)ms)")
@@ -970,13 +950,15 @@ final class ProcessTapController: ProcessTapControlling {
             elapsedMs += Int(pollIntervalMs)
         }
 
-        // Handle timeout - force completion if progress incomplete
-        let progressAtTimeout = crossfadeState.progress
-        if progressAtTimeout < 1.0 {
-            logger.warning("[CROSSFADE] Timeout at \(progressAtTimeout * 100)% - forcing completion")
-            crossfadeState.progress = 1.0
+        // A live resource ID cannot compensate for a secondary that stopped
+        // delivering frames. Keep the primary and enter the fallback on timeout.
+        guard crossfadeState.isCrossfadeComplete else {
+            throw CrossfadeError.secondaryTapFailed
         }
 
+        try Task.checkCancellation()
+        // IDs alone do not prove a secondary has ever rendered.
+        guard crossfadeState.isWarmupComplete else { throw CrossfadeError.secondaryTapFailed }
         // Verify secondary tap is valid before promotion
         guard secondaryResources.aggregateDeviceID.isValid, secondaryResources.deviceProcID != nil else {
             logger.error("[CROSSFADE] Secondary tap invalid after timeout")
@@ -1056,11 +1038,7 @@ final class ProcessTapController: ProcessTapControlling {
         }
         secondaryEQProcessor = secEQ
 
-        let secAutoEQ = AutoEQProcessor(sampleRate: sampleRate)
-        if let profile = autoEQProcessor?.currentProfile {
-            secAutoEQ.updateProfile(profile)
-        }
-        secondaryAutoEQProcessor = secAutoEQ
+        secondaryAutoEQProcessor = autoEQProcessor?.makeCopy(sampleRate: sampleRate) ?? AutoEQProcessor(sampleRate: sampleRate)
 
         let secLoudnessEqualizer = LoudnessEqualizer(settings: loudnessEqualizerProcessor?.currentSettings ?? LoudnessEqualizerSettings(), sampleRate: Float(sampleRate))
         secondaryLoudnessEqualizerProcessor = secLoudnessEqualizer
@@ -1107,7 +1085,8 @@ final class ProcessTapController: ProcessTapControlling {
 
     /// Tears down any in-progress secondary tap (used by re-entrant crossfade guard).
     private func cleanupSecondaryTap() {
-        guard secondaryResources.isActive else { return }
+        // Even failed creation can leave processors after resource IDs were
+        // cleared. Always clear those references and the callback identity.
         _secondaryCallbackID = 0
         secondaryResources.destroy()
         secondaryEQProcessor = nil
@@ -1170,10 +1149,9 @@ final class ProcessTapController: ProcessTapControlling {
         // volume, ramp coefficient, and stereo channels BEFORE it sees the new
         // _primaryCallbackID and switches to primary-role behavior.
         OSMemoryBarrier()  // Flush all prior state stores before publishing new role
-        _primaryCallbackID = _secondaryCallbackID
-        _secondaryCallbackID = 0
+        callbackIDs.store(UInt64(_secondaryCallbackID), ordering: .releasing)
 
-        // CrossfadeState reset is handled by the caller (performCrossfadeSwitch calls complete())
+        // CrossfadeState reset is handled by performCrossfadeSwitch after promotion.
     }
 
     /// Performs a destructive (non-crossfade) device switch with silence padding.
@@ -1356,8 +1334,10 @@ final class ProcessTapController: ProcessTapControlling {
         timing: RenderTimingState? = nil
     ) {
         // Zero is the invalidation sentinel and can never identify a live IO proc.
-        let isPrimary = callbackID != 0 && (callbackID == _primaryCallbackID)
-        let isSecondary = callbackID != 0 && !isPrimary && (callbackID == _secondaryCallbackID)
+        let crossfadeGeneration = crossfadeState.generation
+        let ids = callbackIDs.load(ordering: .acquiring)
+        let isPrimary = callbackID != 0 && (callbackID == UInt32(truncatingIfNeeded: ids))
+        let isSecondary = callbackID != 0 && !isPrimary && (callbackID == UInt32(truncatingIfNeeded: ids >> 32))
 
         let outputBuffers = UnsafeMutableAudioBufferListPointer(outputBufferList)
 
@@ -1434,7 +1414,7 @@ final class ProcessTapController: ProcessTapControlling {
         } else {
             _secondaryPeakLevel = _secondaryPeakLevel + levelSmoothingFactor * (rawPeak - _secondaryPeakLevel)
             // Only the secondary callback advances crossfade progress (single-writer pattern).
-            _ = crossfadeState.updateProgress(samples: totalSamplesThisBuffer)
+            _ = crossfadeState.updateProgress(samples: totalSamplesThisBuffer, generation: crossfadeGeneration)
         }
 
         if _isMuted {
