@@ -28,6 +28,12 @@ def run(command, *, env, log=None):
         raise SystemExit(result.returncode)
 
 
+def sanitizer_alerts(diagnostic_text):
+    return [line for line in diagnostic_text.splitlines() if any(marker in line for marker in
+            ['WARNING: ThreadSanitizer:', 'ERROR: AddressSanitizer:', 'ERROR: LeakSanitizer:',
+             'SUMMARY: ThreadSanitizer:', 'SUMMARY: AddressSanitizer:'])]
+
+
 def resolve_paths(value, *, products, original_host):
     if isinstance(value, str):
         return value.replace('__TESTROOT__', str(products)).replace('__TESTHOST__', str(original_host))
@@ -164,9 +170,17 @@ def main():
         if report.returncode:
             raise SystemExit(f'Could not read test summary: {report.stderr}')
         summary = json.loads(report.stdout)
+        # Xcode may return success and mark Swift Testing cases passed while
+        # sanitizer diagnostics are only present in the process log.
+        diagnostic_text = (run_dir / f'{suite}.log').read_text(errors='replace')
+        alerts = sanitizer_alerts(diagnostic_text)
+        summary['sanitizerAlerts'] = alerts
+
         (run_dir / f'{suite}-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
         if summary.get('totalTestCount', 0) == 0 or summary.get('passedTests', 0) == 0:
             raise SystemExit('No tests passed. Check --only filters and skipped tests; an empty run is not success.')
+        if alerts:
+            raise SystemExit('Sanitizer diagnostics make this run fail:\n' + '\n'.join(alerts))
         if summary.get('failedTests', 0):
             raise SystemExit('The result bundle contains failed tests.')
         print(f"{suite}: {summary['passedTests']} passed, {summary.get('skippedTests', 0)} skipped", flush=True)

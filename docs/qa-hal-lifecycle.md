@@ -31,7 +31,8 @@ proc. No native C HAL calls or nested HAL run loops remain in the controller.
 
 OwnedHALExecutor admits four worker jobs. A timed-out/cancelled job owns its result
 until it returns; discard handles late success, failure and admission rejection.
-An in-progress start cannot race destruction. TapLifecycleAdmission also bounds
+The result itself is published and read under one lock; the continuation only
+wakes the caller. An in-progress start cannot race destruction. TapLifecycleAdmission also bounds
 prepare/configure/start transactions, asynchronously queuing activation bursts.
 
 The native callback directly invokes its captured context (nil dispatch queue).

@@ -26,9 +26,11 @@ nonisolated final class OwnedHALExecutor: Sendable {
     func run<T: Sendable>(timeout: TimeInterval = 4,
                           work: @escaping @Sendable () throws -> T,
                           discard: @escaping @Sendable (Result<T, Error>) -> Void = { _ in }) async throws -> T {
-        let state = OSAllocatedUnfairLock<(finished: Bool, continuation: CheckedContinuation<T, Error>?)>(initialState: (false, nil))
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+        // Publish the actual result under the same lock the awaiting actor
+        // acquires. A continuation is only the wakeup, never the data channel.
+        let state = OSAllocatedUnfairLock<(finished: Bool, continuation: CheckedContinuation<Void, Never>?, result: Result<T, Error>?)>(initialState: (false, nil, nil))
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
                 let cancelled = state.withLock { value -> Bool in
                     if value.finished { return true }
                     value.continuation = continuation
@@ -36,7 +38,7 @@ nonisolated final class OwnedHALExecutor: Sendable {
                 }
                 if cancelled {
                     discard(.failure(CancellationError()))
-                    continuation.resume(throwing: CancellationError())
+                    continuation.resume()
                     return
                 }
                 let admitted = count.withLock { value in
@@ -45,26 +47,32 @@ nonisolated final class OwnedHALExecutor: Sendable {
                 guard admitted else {
                     discard(.failure(TapLifecycleError.saturated))
                     let waiter = state.withLock { value in
-                        value.finished = true; defer { value.continuation = nil }; return value.continuation
+                        guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                        value.finished = true; value.result = .failure(TapLifecycleError.saturated)
+                        defer { value.continuation = nil }; return value.continuation
                     }
-                    waiter?.resume(throwing: TapLifecycleError.saturated)
+                    waiter?.resume()
                     return
                 }
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + max(0, timeout)) {
                     let waiter = state.withLock { value in
-                        value.finished = true; defer { value.continuation = nil }; return value.continuation
+                        guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                        value.finished = true; value.result = .failure(TapLifecycleError.deadline)
+                        defer { value.continuation = nil }; return value.continuation
                     }
-                    waiter?.resume(throwing: TapLifecycleError.deadline)
+                    waiter?.resume()
                 }
                 let thread = Thread { [self] in
                     let result = Result { try work() }
                     let waiter = state.withLock { value in
-                        value.finished = true; defer { value.continuation = nil }; return value.continuation
+                        guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                        value.finished = true; value.result = result
+                        defer { value.continuation = nil }; return value.continuation
                     }
                     if case .failure = result { discard(result) }
                     else if waiter == nil { discard(result) }
                     count.withLock { $0 -= 1 }
-                    waiter?.resume(with: result)
+                    waiter?.resume()
                 }
                 thread.name = "FineTune.HAL.Lifecycle"
                 thread.stackSize = 1024 * 1024
@@ -72,9 +80,12 @@ nonisolated final class OwnedHALExecutor: Sendable {
             }
         } onCancel: {
             let waiter = state.withLock { value in
-                value.finished = true; defer { value.continuation = nil }; return value.continuation
+                guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                value.finished = true; value.result = .failure(CancellationError())
+                defer { value.continuation = nil }; return value.continuation
             }
-            waiter?.resume(throwing: CancellationError())
+            waiter?.resume()
         }
+        return try state.withLock { $0.result! }.get()
     }
 }
