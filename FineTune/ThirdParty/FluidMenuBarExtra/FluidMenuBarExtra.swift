@@ -67,6 +67,7 @@ public struct FluidMenuBarExtra<Content: View>: Scene {
     private let alignment: PopUpAlignment
     private let screenClippingBehaviour: ScreenClippingBehaviour
     private let content: () -> Content
+    private var hudAnchor: HUDMenuBarAnchor?
 
     /// - Parameters:
     ///   - title: If no image is provided (`.none`), this is the text shown instead.  If an image is provided, only the image is shown but this title is used as the accessibility title (e.g. for screen readers).
@@ -254,6 +255,12 @@ public struct FluidMenuBarExtra<Content: View>: Scene {
         state.statusItem?.dismissWindow()
     }
 
+    func volumeHUDAnchor(_ anchor: HUDMenuBarAnchor) -> Self {
+        var scene = self
+        scene.hudAnchor = anchor
+        return scene
+    }
+
     public var body: some Scene {
         if let statusItem = state.statusItem {
             statusItem.menu = menu
@@ -272,6 +279,7 @@ public struct FluidMenuBarExtra<Content: View>: Scene {
                                                            screenClippingBehaviour: screenClippingBehaviour)
         }
 
+        state.statusItem?.hudAnchor = hudAnchor
         return Settings {}.onChange(of: isInserted) { state.statusItem?.isVisible = $0 }
     }
 }

@@ -77,6 +77,7 @@ struct FineTuneApp: App {
         FluidMenuBarExtra("FineTune", image: launchIconImage, isInserted: $showMenuBarExtra) {
             menuBarContent
         }
+        .volumeHUDAnchor(hudController.menuBarAnchor)
     }
 
     @ViewBuilder
@@ -157,6 +158,11 @@ struct FineTuneApp: App {
     }
 
     init() {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--hud-material-lab") {
+            HUDMaterialLab.run()
+        }
+        #endif
         // Install crash handler to clean up aggregate devices on abnormal exit
         CrashGuard.install()
         // Destroy any orphaned aggregate devices from previous crashes
@@ -276,7 +282,9 @@ struct FineTuneApp: App {
         // permission required for the hotkey itself). Registry start() is deferred
         // to a SwiftUI `.task` on the popup content so the FluidMenuBarExtra
         // status item has been materialized before any hotkey can fire.
-        let popupController = MenuBarPopupController()
+        let popupController = MenuBarPopupController(popupToggle: { [weak anchor = hud.menuBarAnchor] in
+            anchor?.togglePopupPresentation() ?? false
+        })
         let resolver = TargetAppResolver(
             ownBundleID: Bundle.main.bundleIdentifier ?? "com.finetuneapp.FineTune"
         )

@@ -8,16 +8,16 @@ import SwiftUI
 import AppKit
 @testable import FineTune
 
-@Suite("TahoeStyleHUD — device-name font (AC #13)")
+@Suite("CapsuleVolumeHUD — device-name font (AC #13)")
 @MainActor
-struct TahoeStyleHUDNameFontTests {
+struct CapsuleVolumeHUDNameFontTests {
 
     @Test("nameFont is the rowNameBold token (shared with device/app rows)")
     func nameFontIsRowNameBold() {
         // The invariant is that the HUD reuses the design-system token, not a
         // specific literal font (rowNameBold is `Font.headline`, ~13 pt semibold,
         // which isn't `==` to an explicit `.system(size:weight:)`).
-        #expect(TahoeStyleHUD.nameFont == DesignTokens.Typography.rowNameBold)
+        #expect(CapsuleVolumeHUD.nameFont == DesignTokens.Typography.rowNameBold)
     }
 }
 
@@ -68,10 +68,10 @@ struct HUDDeviceNameSmokeTests {
         #expect(hud.showCallCount == 1)
     }
 
-    @Test("TahoeStyleHUD constructs without error for a 60-char device name")
+    @Test("CapsuleVolumeHUD constructs without error for a 60-char device name")
     func longNamePreviewConstruction() {
         let longName = "Ronit's MacBook Pro Speakers (Built-in Audio Output)"
         // Construction-only smoke; rendering is covered by xcode-cli preview.
-        _ = TahoeStyleHUD(sliderFraction: 0.75, mute: false, deviceName: longName)
+        _ = CapsuleVolumeHUD(sliderFraction: 0.75, mute: false, deviceName: longName)
     }
 }

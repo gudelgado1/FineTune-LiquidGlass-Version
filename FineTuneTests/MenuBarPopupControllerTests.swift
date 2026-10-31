@@ -6,6 +6,21 @@ import AppKit
 @Suite("MenuBarPopupController", .serialized)
 @MainActor
 struct MenuBarPopupControllerTests {
+    @Test("bound popup action handles repeated hotkeys without a synthetic mouse event")
+    func boundActionHandlesHotkeys() {
+        var visible = false
+        var calls = 0
+        let controller = MenuBarPopupController(accessibilityTitle: "FineTuneTest-NoSuchItem-\(UUID().uuidString)", popupToggle: {
+            calls += 1
+            visible.toggle()
+            return true
+        })
+        controller.toggle()
+        #expect(visible && calls == 1)
+        controller.toggle()
+        #expect(!visible && calls == 2)
+    }
+
     @Test("toggle is a no-op when no matching status item exists")
     func noMatchingItem() {
         // Use a deliberately unique accessibility title so no real status item

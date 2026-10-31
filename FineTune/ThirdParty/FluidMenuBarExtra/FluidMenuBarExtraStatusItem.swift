@@ -15,10 +15,26 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
     let window: NSWindow
     var menu: NSMenu?
     @objc private let statusItem: NSStatusItem
+    weak var hudAnchor: HUDMenuBarAnchor? {
+        didSet {
+            guard oldValue !== hudAnchor else { return }
+            oldValue?.onPopupRequested = nil
+            oldValue?.onPopupEnded = nil
+            oldValue?.setPopupVisible(false)
+            oldValue?.bind(to: nil)
+            hudAnchor?.onPopupRequested = { [weak self] in self?.presentPopupWindow() }
+            hudAnchor?.onPopupEnded = { [weak self] animated in self?.dismissWindow(animated: animated) }
+            hudAnchor?.bind(to: statusItem)
+            hudAnchor?.setPopupVisible(window.isVisible && !popupIsDismissing)
+        }
+    }
     private var statusItemVisibilityObservation: NSKeyValueObservation? = nil
 
     private var localEventMonitor: EventMonitor?
     private var globalEventMonitor: EventMonitor?
+    private var popupDismissalGeneration = 0
+    private var popupIsDismissing = false
+    private var postedLegacyMenuTracking = false
 
     var alignment: PopUpAlignment
     var screenClippingBehaviour: ScreenClippingBehaviour {
@@ -87,31 +103,8 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
         }
 
         localEventMonitor = LocalEventMonitor(mask: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            if let self,
-               let button = self.statusItem.button,
-               event.window == button.window
-            {
-                switch (event.type, self.menu, event.modifierFlags.contains(.control)) {
-                case (.leftMouseDown, _, false):
-                    fallthrough
-                case (_, nil, _):
-                    if !event.modifierFlags.contains(.command) {
-                        self.didPressStatusBarButton(button)
-                        return nil
-                    }
-
-                case (_, let menu?, true):
-                    fallthrough
-                case (.rightMouseDown, let menu?, _):
-                    menu.popUp(positioning: nil, at: CGPoint(x: 0, y: button.bounds.maxY + 5), in: button)
-                    return nil
-
-                default:
-                    break
-                }
-            }
-
-            return event
+            guard let self else { return event }
+            return self.handleStatusItemMouseDown(event)
         }
 
         globalEventMonitor = GlobalEventMonitor(mask: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
@@ -131,17 +124,67 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
         NSStatusBar.system.removeStatusItem(statusItem)
     }
 
-    private func didPressStatusBarButton(_ sender: NSStatusBarButton) {
-        if window.isVisible {
-            dismissWindow()
-            return
+    /// Shared by the actual local event monitor and the event-chain regression.
+    func handleStatusItemMouseDown(_ event: NSEvent) -> NSEvent? {
+        if let button = self.statusItem.button,
+           event.window == button.window
+        {
+            #if DEBUG
+            HUDMaterialLab.trace("fluid.local status hud=\(hudAnchor?.isHUDVisible == true)")
+            #endif
+            // Command-drag remains owned by the menu bar.
+            if event.type == .leftMouseDown && event.modifierFlags.contains(.command) { return event }
+            let contextClick = event.type == .rightMouseDown || event.modifierFlags.contains(.control)
+            if contextClick, let menu = self.menu {
+                menu.popUp(positioning: nil, at: CGPoint(x: 0, y: button.bounds.maxY + 5), in: button)
+                return nil
+            }
+            if !contextClick, self.hudAnchor?.handlesNativeInteraction == true {
+                if self.hudAnchor?.canPromoteHUD == true {
+                    // Promote the already-expanded HUD session instead of
+                    // letting the same click toggle that session closed.
+                    self.hudAnchor?.requestPopupFromStatusItemClick()
+                    return nil
+                }
+                // The public27 delegate owns ordinary left-click activation.
+                // Do not run the old mouse toggle as well.
+                return event
+            }
+            // Older systems and right/control-click without a context menu
+            // preserve the existing toggle behavior.
+            self.didPressStatusBarButton(button)
+            return nil
         }
 
-        setWindowFrame()
+        return event
+    }
 
-        // Tells the system to persist the menu bar in full screen mode.
-        DistributedNotificationCenter.default().post(name: .beginMenuTracking, object: nil)
+    private func didPressStatusBarButton(_ sender: NSStatusBarButton) {
+        if window.isVisible && !popupIsDismissing {
+            dismissWindow()
+        } else if let hudAnchor {
+            hudAnchor.requestPopupPresentation()
+        } else {
+            presentPopupWindow()
+        }
+    }
+
+    private func presentPopupWindow() {
+        guard !window.isVisible || popupIsDismissing else { return }
+        popupDismissalGeneration += 1
+        popupIsDismissing = false
+        // A previous fade must not order out a newly reopened popup.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            window.animator().alphaValue = 1
+        }
+        setWindowFrame()
+        if hudAnchor?.handlesNativeInteraction != true {
+            DistributedNotificationCenter.default().post(name: .beginMenuTracking, object: nil)
+            postedLegacyMenuTracking = true
+        }
         window.makeKeyAndOrderFront(nil)
+        hudAnchor?.setPopupVisible(true)
     }
 
     var isVisible: Bool {
@@ -155,7 +198,7 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         globalEventMonitor?.start()
-        setButtonHighlighted(to: true)
+        setPopupHighlightOwnership(true)
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -164,32 +207,41 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
     }
     
     func showWindow() {
-        guard !window.isVisible,
-              let button = statusItem.button
-        else { return }
-        
-        didPressStatusBarButton(button)
+        guard !window.isVisible || popupIsDismissing else { return }
+        if let hudAnchor { hudAnchor.requestPopupPresentation() }
+        else { presentPopupWindow() }
     }
-    
-    func dismissWindow() {
-        // Tells the system to cancel persisting the menu bar in full screen mode.
-        DistributedNotificationCenter.default().post(name: .endMenuTracking, object: nil)
 
+    func dismissWindow(animated: Bool = true) {
+        // Release this owner before its fade; a HUD owner can retain the session.
+        setPopupHighlightOwnership(false)
+        guard window.isVisible, !popupIsDismissing else { return }
+        popupIsDismissing = true
+        popupDismissalGeneration += 1
+        let generation = popupDismissalGeneration
+        if postedLegacyMenuTracking {
+            DistributedNotificationCenter.default().post(name: .endMenuTracking, object: nil)
+            postedLegacyMenuTracking = false
+        }
+        let finish: () -> Void = { [weak self] in
+            guard let self, self.popupDismissalGeneration == generation else { return }
+            self.window.orderOut(nil)
+            self.window.alphaValue = 1
+            self.popupIsDismissing = false
+        }
+        guard animated else { finish(); return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.3
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-
             window.animator().alphaValue = 0
-
-        } completionHandler: { [weak self] in
-            self?.window.orderOut(nil)
-            self?.window.alphaValue = 1
-            self?.setButtonHighlighted(to: false)
+        } completionHandler: {
+            MainActor.assumeIsolated { finish() }
         }
     }
 
-    private func setButtonHighlighted(to highlight: Bool) {
-        statusItem.button?.highlight(highlight)
+    private func setPopupHighlightOwnership(_ visible: Bool) {
+        if let hudAnchor { hudAnchor.setPopupVisible(visible) }
+        else { statusItem.button?.highlight(visible) }
     }
 
     func setWindowFrame(size: CGSize? = nil,

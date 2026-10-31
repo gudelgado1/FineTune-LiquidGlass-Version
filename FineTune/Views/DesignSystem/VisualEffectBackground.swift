@@ -104,7 +104,7 @@ struct GlassBackgroundModifier: ViewModifier {
         if #available(macOS 26.0, *) {
             // `.regular` — the standard Liquid Glass variant. The earlier
             // darkness-over-light-desktop concern was actually the HUD rendering
-            // dimmed as a non-key window; now that the HUD is a key window it's
+            // dimmed as a non-key window; the popup uses an active window it's
             // vibrant, so we keep the default (more defined) glass everywhere.
             content
                 .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
@@ -143,8 +143,8 @@ struct GlassPanelModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
-            // `.regular` to match the popup. The HUD panel is a key window, so this
-            // renders vibrant (not the dimmed inactive look) just like the popup.
+            // `.regular` to match the popup. Custom HUD panels are non-key; the capsule has its
+            // own material and active-appearance policy.
             content
                 .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
         } else {

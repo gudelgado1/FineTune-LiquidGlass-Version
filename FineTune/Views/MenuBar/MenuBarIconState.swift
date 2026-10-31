@@ -1,6 +1,6 @@
 // FineTune/Views/MenuBar/MenuBarIconState.swift
 // Value types for the menu bar icon. Bucket thresholds mirror
-// TahoeStyleHUD.waveIconName / ClassicStyleHUD.waveIconName.
+// CapsuleVolumeHUD.waveIconName / ClassicStyleHUD.waveIconName.
 // The AppKit NSImage bridge lives in MenuBarIconImage+NSImage.swift.
 
 import Foundation

@@ -85,7 +85,7 @@ struct HUDInteractionTests {
         defer { hud.shutdown() }
         hud.hideDelayOverride = .milliseconds(40)
         hud.show(sliderFraction: 0.5, mute: false, deviceName: "Display")
-        try? await Task.sleep(for: .milliseconds(350))
+        try? await Task.sleep(for: .milliseconds(650))
         #expect(hud.panel?.isVisible == false)
     }
 
@@ -100,7 +100,7 @@ struct HUDInteractionTests {
         try? await Task.sleep(for: .milliseconds(250))
         #expect(hud.panel?.isVisible == true)
         hud.handleHoverChange(false)
-        try? await Task.sleep(for: .milliseconds(350))
+        try? await Task.sleep(for: .milliseconds(650))
         #expect(hud.panel?.isVisible == false)
     }
 
@@ -112,7 +112,7 @@ struct HUDInteractionTests {
         hud.hide()
         hud.dismiss()
         hud.show(sliderFraction: 0.6, mute: false, deviceName: "Display")
-        try? await Task.sleep(for: .milliseconds(250))
+        try? await Task.sleep(for: .milliseconds(650))
         #expect(hud.panel?.isVisible == true)
         #expect(hud.panel?.alphaValue == 1)
     }

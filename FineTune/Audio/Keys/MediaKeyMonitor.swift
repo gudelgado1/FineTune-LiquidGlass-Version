@@ -239,6 +239,7 @@ final class MediaKeyMonitor {
             currentMute: volumeMonitor.muteStates[deviceID] ?? false,
             setVolume: { id, vol in volumeMonitor.setVolume(for: id, to: vol) },
             setMute:   { id, mute in volumeMonitor.setMute(for: id, to: mute) },
+            readCurrentVolume: { volumeMonitor.volumes[deviceID] ?? 0 },
             playFeedback: { gain in
                 self.feedbackPlayer?.requestFeedback(
                     gain: gain,
@@ -285,6 +286,7 @@ final class MediaKeyMonitor {
         currentMute: Bool,
         setVolume: (AudioDeviceID, Float) -> Void,
         setMute: (AudioDeviceID, Bool) -> Void,
+        readCurrentVolume: (() -> Float)? = nil,
         playFeedback: (Float) -> Void = { _ in }
     ) {
         let shouldShowHUD = !popupVisibility.isVisible
@@ -353,7 +355,12 @@ final class MediaKeyMonitor {
             let newMute = !currentMute
             setMute(deviceID, newMute)
             if shouldShowHUD {
-                hudController.show(sliderFraction: currentSlider, mute: newMute, deviceName: deviceName)
+                // Software mute publishes zero; unmute restores the saved gain
+                // synchronously. Read the resulting cached scalar, not the zero
+                // captured before setMute. This performs no extra HAL query.
+                let visibleVolume = newMute ? currentVolume : (readCurrentVolume?() ?? currentVolume)
+                let visibleSlider = VolumeMapping.sliderFraction(forSystemGain: visibleVolume, tier: tier)
+                hudController.show(sliderFraction: visibleSlider, mute: newMute, deviceName: deviceName)
             }
             iconCoordinator?.flashDevice()
 

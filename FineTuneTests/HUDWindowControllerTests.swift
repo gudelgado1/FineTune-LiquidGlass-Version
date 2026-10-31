@@ -18,7 +18,7 @@ struct HUDWindowControllerPositionTests {
 
     // MARK: - Tahoe style
 
-    @Test("Tahoe style places HUD at top-right, inset 8pt from edges (AC #16)")
+    @Test("Tahoe style places HUD at top-right compositor envelope (AC #16)")
     func tahoeTopRight() {
         let size = NSSize(width: 300, height: 72)
         let pt = HUDWindowController.computePosition(
@@ -27,8 +27,8 @@ struct HUDWindowControllerPositionTests {
             visibleFrame: screen,
             suppressionDegraded: false
         )
-        let expectedX = screen.maxX - size.width - 8
-        let expectedY = screen.maxY - size.height - 8
+        let expectedX = screen.maxX - size.width
+        let expectedY = screen.maxY - size.height
         #expect(pt.x == expectedX)
         #expect(pt.y == expectedY)
     }
@@ -43,7 +43,7 @@ struct HUDWindowControllerPositionTests {
             suppressionDegraded: true
         )
         let expectedX = screen.minX + screen.width * 0.25 - size.width / 2
-        let expectedY = screen.maxY - size.height - 8
+        let expectedY = screen.maxY - size.height
         #expect(pt.x == expectedX)
         #expect(pt.y == expectedY)
     }
@@ -65,7 +65,7 @@ struct HUDWindowControllerPositionTests {
                 suppressionDegraded: true
             )
             #expect(pt.x == vf.minX + vf.width * 0.25 - size.width / 2)
-            #expect(pt.y == vf.maxY - size.height - 8)
+            #expect(pt.y == vf.maxY - size.height)
         }
     }
 
@@ -106,7 +106,7 @@ struct HUDWindowControllerPositionTests {
 
     // MARK: - Edge cases
 
-    @Test("Tahoe with zero-size HUD lands at top-right corner minus 8pt")
+    @Test("Tahoe with zero-size HUD lands at top-right corner")
     func tahoeZeroSize() {
         let size = NSSize.zero
         let pt = HUDWindowController.computePosition(
@@ -115,8 +115,8 @@ struct HUDWindowControllerPositionTests {
             visibleFrame: screen,
             suppressionDegraded: false
         )
-        #expect(pt.x == screen.maxX - 8)
-        #expect(pt.y == screen.maxY - 8)
+        #expect(pt.x == screen.maxX)
+        #expect(pt.y == screen.maxY)
     }
 }
 

@@ -102,7 +102,7 @@ struct ShortcutsTab: View {
                 SettingsRowDivider()
                 SettingsRow(
                     "HUD Style",
-                    description: "How the volume indicator appears"
+                    description: "Capsule shows a compact volume bar. Classic shows the square volume indicator."
                 ) {
                     HUDStyleSegmentedControl(selection: $settings.appSettings.hudStyle)
                 }

@@ -10,7 +10,7 @@ struct HUDStyleSegmentedControl: View {
     var body: some View {
         Picker("", selection: $selection) {
             ForEach(HUDStyle.allCases) { style in
-                Text(style.id.capitalized).tag(style)
+                Text(style == .tahoe ? "Capsule" : "Classic").tag(style)
             }
         }
         .pickerStyle(.segmented)

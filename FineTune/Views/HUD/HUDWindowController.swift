@@ -7,6 +7,14 @@ import os
 private final class HUDPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+    // Placement already accounts for the menu bar. AppKit must not move the
+    // transparent effect margin below it and add a second menu-bar-height inset.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+    // Recovered OSDPanel appearance selectors. They affect material activity,
+    // never keyboard focus; canBecomeKey/canBecomeMain stay false.
+    @objc(_hasActiveAppearance) dynamic func hudHasActiveAppearance() -> Bool { true }
+    @objc(_hasKeyAppearance) dynamic func hudHasKeyAppearance() -> Bool { true }
+    @objc(hasKeyAppearance) dynamic func hudKeyAppearance() -> Bool { true }
 }
 
 /// Mouse controls still respond on the first click while another app has focus.
@@ -67,6 +75,7 @@ final class HUDWindowController {
     private let settingsManager: SettingsManager
     private let mediaKeyStatus: MediaKeyStatus
     private let popupVisibility: PopupVisibilityService
+    let menuBarAnchor: HUDMenuBarAnchor
     private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "HUDWindowController")
 
     private(set) var panel: NSPanel?
@@ -75,6 +84,13 @@ final class HUDWindowController {
     private var localDismissMonitor: Any?
     private var globalDismissMonitor: Any?
     private var isHovering = false
+    private var isDragging = false
+    private var ignoresInitialHover = false
+    private var mouseAtPresentation = NSPoint.zero
+    private var localPointerMonitor: Any?
+    private var globalPointerMonitor: Any?
+    private var isSystemCapsule = false
+    private let motionState = HUDMotionState()
     private var styleAtLastShow: HUDStyle = .tahoe
     /// Invalidates in-flight fade-out completions. A `show()` that arrives during
     /// the ~110 ms fade-out bumps this; the stale fade's completion handler then
@@ -92,19 +108,28 @@ final class HUDWindowController {
 
     var hideDelayOverride: Duration?
     var observesOutsideClicks = true
+    var mousePositionProvider: () -> NSPoint = { NSEvent.mouseLocation }
     var fullscreenProvider: () -> Bool = HUDWindowController.foregroundAppIsFullscreen
-    var frameProvider: () -> NSRect? = { NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame }
+    /// Optional virtual screen for tests/lab. Production uses NSScreen geometry.
+    var frameProvider: (() -> NSRect?)?
     private(set) var showCallCount: Int = 0
     private(set) var showDidUpdatePanel: Bool = false
 
     init(
         settingsManager: SettingsManager,
         mediaKeyStatus: MediaKeyStatus,
-        popupVisibility: PopupVisibilityService
+        popupVisibility: PopupVisibilityService,
+        menuBarAnchor: HUDMenuBarAnchor? = nil
     ) {
         self.settingsManager = settingsManager
         self.mediaKeyStatus = mediaKeyStatus
         self.popupVisibility = popupVisibility
+        self.menuBarAnchor = menuBarAnchor ?? HUDMenuBarAnchor()
+        self.menuBarAnchor.geometryDidChange = { [weak self] in self?.repositionForMenuBarAnchor() }
+        self.menuBarAnchor.onHUDSessionEnded = { [weak self] in self?.hide() }
+        self.menuBarAnchor.hudPresentationIsVisible = { [weak self] in
+            self?.isSystemCapsule == true && self?.panel?.isVisible == true
+        }
         subscribeToSettingsChangedNotification()
     }
 
@@ -112,12 +137,14 @@ final class HUDWindowController {
         if let observer = settingsChangedObserver {
             DistributedNotificationCenter.default().removeObserver(observer)
         }
-        let monitors = [localDismissMonitor, globalDismissMonitor].compactMap { $0 }
+        let monitors = [localDismissMonitor, globalDismissMonitor, localPointerMonitor, globalPointerMonitor].compactMap { $0 }
         DispatchQueue.main.async { monitors.forEach(NSEvent.removeMonitor) }
         // `deinit` is nonisolated; `shutdown()` is preferred for synchronous teardown.
         if let panel {
             DispatchQueue.main.async { panel.orderOut(nil) }
         }
+        let anchor = menuBarAnchor
+        DispatchQueue.main.async { anchor.setHUDVisible(false) }
     }
 
     /// Synchronous teardown for `willTerminate` — hides without animation.
@@ -131,8 +158,13 @@ final class HUDWindowController {
         hideTask = nil
         hideAnimationGeneration += 1
         isHovering = false
+        isDragging = false
+        ignoresInitialHover = false
+        isSystemCapsule = false
+        removePointerMonitors()
         removeDismissMonitors()
         panel?.orderOut(nil)
+        menuBarAnchor.setHUDVisible(false)
     }
 
     // MARK: - Style-indexed hide delay
@@ -159,10 +191,19 @@ final class HUDWindowController {
         }
 
         let style = settingsManager.appSettings.hudStyle
+        isSystemCapsule = style == .tahoe
+        removePointerMonitors()
         let appearance = settingsManager.appSettings.appearance
-        if styleAtLastShow != style || panel?.isVisible != true { isHovering = false }
+        if styleAtLastShow != style || panel?.isVisible != true { isHovering = false; isDragging = false }
         styleAtLastShow = style
         let panel = ensurePanel()
+        let newPresentation = !panel.isVisible
+        let reducedMotion = reduceMotionEnabled()
+        if isSystemCapsule && newPresentation {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { motionState.progress = reducedMotion ? 1 : 0 }
+        }
         // Follow the app theme (matches the popup), refreshed each show. System
         // mode resolves to the concrete effective appearance so the panel never
         // renders stale.
@@ -178,22 +219,23 @@ final class HUDWindowController {
         switch style {
         case .tahoe:
             root = AnyView(
-                DismissibleHUD(
-                    content: TahoeStyleHUD(
+                CapsuleVolumeHUD(
                         sliderFraction: displayFraction,
                         mute: mute,
                         deviceName: deviceName,
                         onSliderChange: { [weak self] newFraction in
                             self?.volumeWriter?(Double(newFraction))
-                        }
-                    ),
-                    onDismiss: { [weak self] in self?.dismiss() },
-                    onHover: { [weak self] in self?.handleHoverChange($0) }
+                        },
+                        onHoverChange: { [weak self] in self?.handleHoverChange($0) },
+                        onDragChange: { [weak self] in self?.handleDragChange($0) }
                 )
+                .padding(CapsuleVolumeHUD.effectMargin)
+                .accessibilityAction(named: Text("Dismiss volume notification")) { [weak self] in self?.dismiss() }
                 .environment(\.controlActiveState, .active)
                 .preferredColorScheme(scheme)
             )
-            size = NSSize(width: 316, height: 88)
+            size = NSSize(width: CapsuleVolumeHUD.capsuleSize.width + 80,
+                          height: CapsuleVolumeHUD.capsuleSize.height + 80)
         case .classic:
             root = AnyView(
                 ClassicStyleHUD(sliderFraction: displayFraction, mute: mute)
@@ -202,15 +244,16 @@ final class HUDWindowController {
             size = NSSize(width: 200, height: 200)
         }
 
+        let presentedRoot = isSystemCapsule
+            ? AnyView(HUDMotionRoot(content: root, state: motionState, reduceMotion: reducedMotion))
+            : root
         if let existing = hostingView {
-            existing.rootView = root
+            existing.rootView = presentedRoot
         } else {
-            let hv = HUDHostingView(rootView: root)
+            let hv = HUDHostingView(rootView: presentedRoot)
             hv.frame = NSRect(origin: .zero, size: size)
-            // Clear the hosting view's backing so the panel is truly transparent.
-            // Without this, NSHostingView's opaque default backing sits behind the
-            // SwiftUI `.glassEffect`, leaving nothing for Liquid Glass to sample —
-            // it renders solid dark. Mirrors the popup window's hosting-view patch.
+            // Keep any layer backing transparent so the compositor can sample
+            // windows behind the HUD. NSHostingView itself is already nonopaque.
             hv.wantsLayer = true
             hv.layer?.backgroundColor = NSColor.clear.cgColor
             panel.contentView = hv
@@ -220,6 +263,13 @@ final class HUDWindowController {
 
         panel.setContentSize(size)
         panel.setFrameOrigin(position(for: style, size: size))
+        updateMotionAnchor(for: panel)
+        // Begin the native status-item presentation before the HUD enters.
+        menuBarAnchor.setHUDVisible(isSystemCapsule)
+        if !panel.isVisible && isSystemCapsule {
+            mouseAtPresentation = mousePositionProvider()
+            ignoresInitialHover = panel.frame.insetBy(dx: 40, dy: 40).contains(mouseAtPresentation)
+        }
 
         if panel.isVisible {
             // Possibly mid fade-out: neutralize it or the panel gets ordered out
@@ -230,11 +280,26 @@ final class HUDWindowController {
             panel.alphaValue = 0
             // Present without moving keyboard focus away from the user's app.
             panel.orderFrontRegardless()
-            let duration = reduceMotionEnabled() ? 0.08 : 0.12
+            let duration = reducedMotion ? HUDMotionProfile.reducedFadeDuration : (isSystemCapsule ? HUDMotionProfile.entryDuration : 0.12)
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = duration
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.timingFunction = isSystemCapsule && !reducedMotion
+                    ? HUDMotionProfile.timingFunction(appearing: true)
+                    : CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1.0
+            }
+        }
+
+        if isSystemCapsule {
+            hostingView?.layoutSubtreeIfNeeded()
+            let generation = hideAnimationGeneration
+            // Let the first graph render the initial scale before targeting rest.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isSystemCapsule, self.panel?.isVisible == true,
+                      self.hideAnimationGeneration == generation else { return }
+                withAnimation(reducedMotion ? nil : HUDMotionProfile.animation(appearing: true)) {
+                    self.motionState.progress = 1
+                }
             }
         }
 
@@ -243,6 +308,7 @@ final class HUDWindowController {
         clearPanelBacking(panel)
 
         startDismissMonitors()
+        if isSystemCapsule { startPointerMonitors() }
         scheduleHide(for: style)
         postAccessibilityAnnouncement(panel: panel, sliderFraction: sliderFraction, mute: mute, deviceName: deviceName)
     }
@@ -283,6 +349,11 @@ final class HUDWindowController {
             logger.debug("Skipping per-app HUD: popup is visible")
             return
         }
+        isSystemCapsule = false
+        isDragging = false
+        menuBarAnchor.setHUDVisible(false)
+        ignoresInitialHover = false
+        removePointerMonitors()
 
         if styleAtLastShow != .tahoe || panel?.isVisible != true { isHovering = false }
         styleAtLastShow = .tahoe
@@ -307,10 +378,7 @@ final class HUDWindowController {
         } else {
             let hv = HUDHostingView(rootView: root)
             hv.frame = NSRect(origin: .zero, size: size)
-            // Clear the hosting view's backing so the panel is truly transparent.
-            // Without this, NSHostingView's opaque default backing sits behind the
-            // SwiftUI `.glassEffect`, leaving nothing for Liquid Glass to sample —
-            // it renders solid dark. Mirrors the popup window's hosting-view patch.
+            // Keep any layer backing transparent for the compositor.
             hv.wantsLayer = true
             hv.layer?.backgroundColor = NSColor.clear.cgColor
             panel.contentView = hv
@@ -357,12 +425,25 @@ final class HUDWindowController {
         hideTask = nil
         removeDismissMonitors()
         isHovering = false
-        guard let panel, panel.isVisible else { return }
+        isDragging = false
+        // The reference clears the menu-bar capsule at the start of the fade.
+        // Session cancellation is independent of the fading panel's lifetime.
+        menuBarAnchor.setHUDVisible(false)
+        guard let panel, panel.isVisible else { menuBarAnchor.setHUDVisible(false); return }
+        hideAnimationGeneration += 1
         let generation = hideAnimationGeneration
-        let duration = reduceMotionEnabled() ? 0.08 : 0.11
+        let reducedMotion = reduceMotionEnabled()
+        let duration = reducedMotion ? HUDMotionProfile.reducedFadeDuration : (isSystemCapsule ? HUDMotionProfile.exitDuration : 0.11)
+        if isSystemCapsule {
+            withAnimation(reducedMotion ? nil : HUDMotionProfile.animation(appearing: false)) {
+                motionState.progress = reducedMotion ? 1 : 0
+            }
+        }
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = duration
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            ctx.timingFunction = isSystemCapsule && !reducedMotion
+                ? HUDMotionProfile.timingFunction(appearing: false)
+                : CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().alphaValue = 0.0
         }, completionHandler: { [weak self] in
             // AppKit runs this on the main thread, but the closure isn't typed
@@ -373,6 +454,7 @@ final class HUDWindowController {
                 // stale and must not order out the panel show() just re-presented.
                 guard let self, self.hideAnimationGeneration == generation else { return }
                 panel.orderOut(nil)
+                self.removePointerMonitors()
             }
         })
     }
@@ -397,17 +479,18 @@ final class HUDWindowController {
         style: HUDStyle,
         size: NSSize,
         visibleFrame: NSRect,
-        suppressionDegraded: Bool
+        suppressionDegraded: Bool,
+        topObstruction: CGFloat = 0
     ) -> NSPoint {
         switch style {
         case .tahoe:
             if suppressionDegraded {
                 let x = visibleFrame.minX + visibleFrame.width * 0.25 - size.width / 2
-                let y = visibleFrame.maxY - size.height - 8
+                let y = visibleFrame.maxY - size.height - max(0, topObstruction + 10 - 40)
                 return NSPoint(x: x, y: y)
             } else {
-                let x = visibleFrame.maxX - size.width - 8
-                let y = visibleFrame.maxY - size.height - 8
+                let x = visibleFrame.maxX - size.width
+                let y = visibleFrame.maxY - size.height - max(0, topObstruction + 10 - 40)
                 return NSPoint(x: x, y: y)
             }
         case .classic:
@@ -418,12 +501,55 @@ final class HUDWindowController {
     }
 
     private func position(for style: HUDStyle, size: NSSize) -> NSPoint {
-        let frame = frameProvider() ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        if style == .tahoe, isSystemCapsule, let anchor = menuBarAnchor.geometry {
+            return Self.anchoredPosition(size: size, anchor: anchor, suppressionDegraded: mediaKeyStatus.suppressionDegraded)
+        }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let override = frameProvider?()
+        // Per-app notifications retain their smaller envelope and eight-point
+        // inset from the usable screen; only the system capsule needs 40 points.
+        if style == .tahoe && !isSystemCapsule {
+            let frame = override ?? screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            let x = mediaKeyStatus.suppressionDegraded
+                ? frame.minX + frame.width * 0.25 - size.width / 2
+                : frame.maxX - size.width - 8
+            return NSPoint(x: x, y: frame.maxY - size.height - 8)
+        }
+        let frame = override ?? (style == .tahoe ? screen?.frame : screen?.visibleFrame) ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         return Self.computePosition(
             style: style,
             size: size,
             visibleFrame: frame,
-            suppressionDegraded: mediaKeyStatus.suppressionDegraded
+            suppressionDegraded: mediaKeyStatus.suppressionDegraded,
+            topObstruction: override == nil ? max(screen?.safeAreaInsets.top ?? 0, NSStatusBar.system.thickness) : 0
+        )
+    }
+
+    /// Center the visible capsule under the status button, ten points below it.
+    /// The symmetric compositor margin affects the panel origin, not the gap.
+    static func anchoredPosition(size: NSSize, anchor: HUDMenuBarAnchor.Geometry, suppressionDegraded: Bool) -> NSPoint {
+        let screen = anchor.screenFrame
+        let proposedX = suppressionDegraded
+            ? screen.minX + screen.width * 0.25 - size.width / 2
+            : anchor.buttonFrame.midX - size.width / 2
+        let x = min(max(proposedX, screen.minX), max(screen.minX, screen.maxX - size.width))
+        return NSPoint(x: x, y: anchor.buttonFrame.minY - 10 - size.height + CapsuleVolumeHUD.effectMargin)
+    }
+
+    private func repositionForMenuBarAnchor() {
+        guard isSystemCapsule, let panel, panel.isVisible else { return }
+        panel.setFrameOrigin(position(for: .tahoe, size: panel.frame.size))
+        updateMotionAnchor(for: panel)
+        updatePointerInteractivity(at: mousePositionProvider())
+    }
+
+    private func updateMotionAnchor(for panel: NSPanel) {
+        guard isSystemCapsule else { return }
+        let size = panel.frame.size
+        let source = menuBarAnchor.geometry?.buttonFrame
+        motionState.anchor = UnitPoint(
+            x: source.map { ($0.midX - panel.frame.minX) / size.width } ?? 0.5,
+            y: source.map { (panel.frame.maxY - $0.minY) / size.height } ?? ((CapsuleVolumeHUD.effectMargin - 10) / size.height)
         )
     }
 
@@ -438,7 +564,8 @@ final class HUDWindowController {
             backing: .buffered,
             defer: false
         )
-        p.level = .floating
+        // Recovered GlassOSD level: immediately below the main menu (24 - 1).
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue - 1)
         p.becomesKeyOnlyIfNeeded = true
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .transient]
         p.hasShadow = false
@@ -459,13 +586,8 @@ final class HUDWindowController {
         return p
     }
 
-    /// Strips the opaque backing from the panel's whole view stack so the more
-    /// transparent `.clear` Liquid Glass shows the desktop, not a black slab.
-    /// Clearing only the hosting view isn't enough: AppKit's window frame view
-    /// (the hosting view's superview) keeps its own opaque backing, which the
-    /// previous `.regular` glass hid but `.clear` reveals. We re-apply on the next
-    /// runloop because AppKit can reset the frame view's color after the window
-    /// finishes ordering in. Mirrors the popup window's chrome clearing.
+    /// Keep native panel chrome transparent, including after AppKit orders it in.
+    /// The material supplies its own edge and ambient effect inside the margin.
     private func clearPanelBacking(_ panel: NSPanel) {
         // Belt-and-suspenders: keep the window's own drop shadow off (it can be
         // re-enabled when the panel is ordered in), so no shadow renders
@@ -492,7 +614,7 @@ final class HUDWindowController {
 
     private func scheduleHide(for style: HUDStyle) {
         hideTask?.cancel()
-        guard !isHovering else { hideTask = nil; return }
+        guard !isHovering && !isDragging else { hideTask = nil; return }
         let delay = hideDelay(for: style)
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
@@ -502,6 +624,10 @@ final class HUDWindowController {
     }
 
     func handleHoverChange(_ hovering: Bool) {
+        // Do not pin a newly shown HUD under a stationary cursor. Actual entry
+        // or movement can still keep an interactive indicator available.
+        if hovering && isSystemCapsule && ignoresInitialHover && mousePositionProvider() == mouseAtPresentation { return }
+        ignoresInitialHover = false
         isHovering = hovering
         if hovering {
             hideTask?.cancel()
@@ -509,6 +635,44 @@ final class HUDWindowController {
         } else {
             scheduleHide(for: styleAtLastShow)
         }
+    }
+
+    func handleDragChange(_ dragging: Bool) {
+        isDragging = dragging
+        ignoresInitialHover = false
+        if dragging {
+            hideTask?.cancel()
+            hideTask = nil
+            panel?.ignoresMouseEvents = false
+        } else {
+            scheduleHide(for: styleAtLastShow)
+        }
+    }
+
+    /// The forty-point compositor envelope must not swallow clicks outside the pill.
+    func updatePointerInteractivity(at point: NSPoint) {
+        guard isSystemCapsule, let panel, panel.isVisible else { return }
+        if isDragging { panel.ignoresMouseEvents = false; return }
+        panel.ignoresMouseEvents = !panel.frame.insetBy(dx: 40, dy: 40).contains(point)
+    }
+
+    private func startPointerMonitors() {
+        guard observesOutsideClicks else { return }
+        updatePointerInteractivity(at: mousePositionProvider())
+        localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            MainActor.assumeIsolated { self?.updatePointerInteractivity(at: self?.mousePositionProvider() ?? .zero) }
+            return event
+        }
+        globalPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updatePointerInteractivity(at: self?.mousePositionProvider() ?? .zero) }
+        }
+    }
+
+    private func removePointerMonitors() {
+        if let monitor = localPointerMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = globalPointerMonitor { NSEvent.removeMonitor(monitor) }
+        localPointerMonitor = nil
+        globalPointerMonitor = nil
     }
 
     // Observe outside clicks; never consume or resend the user's mouse event.
@@ -519,13 +683,34 @@ final class HUDWindowController {
             MainActor.assumeIsolated { _ = self?.handleOutsideMouseDown(event) }
             return event
         }
-        globalDismissMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
-            MainActor.assumeIsolated { self?.dismiss() }
+        globalDismissMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            MainActor.assumeIsolated { self?.handleGlobalMouseDown(event) }
         }
+    }
+
+    func handleGlobalMouseDown(_ event: NSEvent) {
+        #if DEBUG
+        HUDMaterialLab.trace("hud.global hud=\(menuBarAnchor.canPromoteHUD)")
+        #endif
+        guard isSystemCapsule, panel?.isVisible == true else { dismiss(); return }
+        if event.type == .leftMouseDown,
+           event.modifierFlags.intersection([.command, .control]).isEmpty,
+           let geometry = menuBarAnchor.geometry,
+           geometry.buttonFrame.contains(mousePositionProvider()) {
+            menuBarAnchor.requestPopupFromStatusItemClick()
+            return
+        }
+        dismiss()
     }
 
     @discardableResult
     func handleOutsideMouseDown(_ event: NSEvent) -> NSEvent {
+        #if DEBUG
+        HUDMaterialLab.trace("hud.local status=\(menuBarAnchor.ownsStatusItemEvent(event)) hud=\(menuBarAnchor.isHUDVisible)")
+        #endif
+        // The item's own monitor must see the still-visible HUD so it can
+        // promote it to the popup. Monitor invocation order is not guaranteed.
+        if isSystemCapsule && menuBarAnchor.ownsStatusItemEvent(event) { return event }
         if let panel, panel.isVisible, event.window !== panel { dismiss() }
         return event
     }
@@ -705,7 +890,7 @@ private struct PerAppHUD: View {
             iconView
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
-                    .font(TahoeStyleHUD.nameFont)
+                    .font(CapsuleVolumeHUD.nameFont)
                     .foregroundStyle(DesignTokens.Colors.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -717,8 +902,7 @@ private struct PerAppHUD: View {
         .padding(.top, 14)
         .padding(.bottom, 12)
         .frame(width: Self.frameWidth, height: Self.frameHeight)
-        // Liquid Glass — vibrant now that the HUD panel is a key window (matches
-        // the popup). Plus the popup's hairline border.
+        // Per-app notifications retain their existing material and border.
         .glassPanel(cornerRadius: Self.cornerRadius)
         .overlay {
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
