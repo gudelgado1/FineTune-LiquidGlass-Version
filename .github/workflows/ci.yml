@@ -15,19 +15,22 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: macos-26
+    # SDK27 is required by the guarded expanded-interface delegate.
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
       - name: Record toolchain
         run: |
           xcodebuild -version
           swift --version
           sw_vers
+          python3 - <<'PYCODE'
+          import subprocess
+          sdk = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-version'], text=True).strip()
+          if int(sdk.split('.')[0]) < 27:
+              raise SystemExit(f'macOS SDK27+ required, selected {sdk}')
+          PYCODE
       - name: Cache pinned packages
         uses: actions/cache@v4
         with:
@@ -65,6 +68,12 @@ jobs:
             -clonedSourcePackagesDirPath build/ci/SourcePackages \
             -disableAutomaticPackageResolution \
             CODE_SIGNING_ALLOWED=NO > build/ci/release.log 2>&1
+      - name: Package ad-hoc QA candidate
+        run: |
+          codesign --force --deep --sign - build/ci/DerivedData/Build/Products/Release/FineTune.app
+          codesign --verify --deep --strict build/ci/DerivedData/Build/Products/Release/FineTune.app
+          ditto -c -k --keepParent build/ci/DerivedData/Build/Products/Release/FineTune.app build/ci/FineTune-QA.zip
+          git rev-parse HEAD > build/ci/source-commit.txt
       - name: Preserve diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,6 +83,8 @@ jobs:
             build/ci/runs/
             build/ci/native-tsan/runs/
             build/ci/release.log
+            build/ci/FineTune-QA.zip
+            build/ci/source-commit.txt
             build/ci/dsp-thread.log
             build/ci/dsp-address.log
             build/ci/dsp-thread/source-hashes.json

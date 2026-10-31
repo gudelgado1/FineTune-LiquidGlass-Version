@@ -42,7 +42,7 @@ To restore on a new machine: `"$SPARKLE_BIN/generate_keys" -f finetune_sparkle_p
 
 ## Cutting a release
 
-Prerequisites: Xcode 26+, `gh` authenticated (`gh auth login`), the Sparkle key in
+Prerequisites: Xcode 27+, `gh` authenticated (`gh auth login`), the Sparkle key in
 your Keychain.
 
 ### 1. Bump the version

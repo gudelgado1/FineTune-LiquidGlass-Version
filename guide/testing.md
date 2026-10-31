@@ -64,7 +64,11 @@ desses hosts ainda não foram isoladas.
 `.github/workflows/ci.yml` compila Debug e executa todos os unitários pelo runner;
 em seguida compila Release sem assinatura de distribuição. Os resultados, o storage
 unitário e os logs são preservados como artefatos inclusive em falhas. O runner usa
-macOS 26 e o Xcode estável disponível nessa imagem, registrando as versões no log.
+a imagem `xcode-27` (preview oficial), verifica SDK macOS27+ e registra as versões
+no log. O candidato de QA recebe assinatura ad hoc e é preservado como artefato;
+ele não é notarizado. A imagem foi escolhida porque o HUD referencia APIs do
+SDK27, mesmo com proteção de disponibilidade para sistemas mais antigos.
+Referência da imagem: https://github.com/actions/runner-images/issues/14404 .
 A execução remota só será confirmada após envio ao GitHub; este arquivo não publica
 releases. A compilação não substitui homologação física em macOS 14.2 ou outros
 sistemas suportados.
