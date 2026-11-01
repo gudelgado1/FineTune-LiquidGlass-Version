@@ -11,9 +11,10 @@ private class KeyablePanel: NSPanel {
 // MARK: - Entrance animation
 
 /// Transparent margin added around the dropdown content so the spring
-/// overshoot can render without being clipped by the panel boundary.
+/// overshoot and the glass shadow can render without being clipped by the
+/// panel boundary.
 /// Must match the `.padding` applied inside `PopoverEntrance`.
-private let popoverOverflowInset: CGFloat = 12
+private let popoverOverflowInset: CGFloat = 24
 
 /// Shared state between showPanel and updateContent so the zoom animation
 /// plays only once — on initial show — and not on every content refresh.
@@ -146,7 +147,13 @@ struct PopoverHost<Content: View>: NSViewRepresentable {
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.level = .popUpMenu
-            panel.hasShadow = true
+            // Liquid Glass draws its own shadow. A window shadow would trace that
+            // shadow's alpha and show as a dark outline around the panel.
+            if #available(macOS 26.0, *) {
+                panel.hasShadow = false
+            } else {
+                panel.hasShadow = true
+            }
             panel.collectionBehavior = [.fullScreenAuxiliary]
             // Apply appearance before any drawing so NSVisualEffectView picks
             // it up on first render. `nil` inherits from the application.
