@@ -32,7 +32,7 @@ struct SettingsRow<Trailing: View>: View {
                         .accessibilityHidden(true)
                 }
                 Text(title)
-                    .font(.system(size: 13))
+                    .font(.body)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
@@ -41,7 +41,7 @@ struct SettingsRow<Trailing: View>: View {
             }
             if showHelp, let description {
                 Text(description)
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

@@ -1,4 +1,5 @@
 // FineTune/Views/Components/AutoEQCurveView.swift
+import Charts
 import SwiftUI
 
 // MARK: - AutoEQ Curve View
@@ -65,12 +66,54 @@ struct AutoEQCurveView: View {
 
     // MARK: - Body
 
+    private var points: [CurvePoint] {
+        zip(frequencies, response).map { frequency, db in
+            CurvePoint(
+                frequency: frequency,
+                db: min(max(db, dbRange.lowerBound), dbRange.upperBound)
+            )
+        }
+    }
+
     var body: some View {
-        Canvas(opaque: false) { context, size in
-            drawGrid(context: &context, size: size)
-            drawZeroLine(context: &context, size: size)
-            drawCurve(context: &context, size: size)
-            drawAxisLabels(context: &context, size: size)
+        let accent = DesignTokens.Colors.accentPrimary
+        let curveOpacity = isCorrectionEnabled ? 1.0 : 0.45
+        let fillOpacity = isCorrectionEnabled ? 0.20 : 0.08
+
+        Chart {
+            // Filling toward the 0-dB baseline keeps the emphasis on deviation from flat.
+            ForEach(points) { point in
+                AreaMark(x: .value("Frequency", point.frequency), yStart: .value("Baseline", 0), yEnd: .value("Gain", point.db))
+                    .foregroundStyle(accent.opacity(fillOpacity))
+                LineMark(x: .value("Frequency", point.frequency), y: .value("Gain", point.db))
+                    .foregroundStyle(accent.opacity(curveOpacity))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            }
+            RuleMark(y: .value("Flat", 0))
+                .foregroundStyle(DesignTokens.Colors.textTertiary)
+                .lineStyle(StrokeStyle(lineWidth: 0.75, dash: [3, 2]))
+        }
+        .chartXScale(domain: minFrequency...maxFrequency, type: .log)
+        .chartYScale(domain: dbRange)
+        .chartXAxis {
+            AxisMarks(values: xGridLines.map(\.value)) { value in
+                AxisGridLine().foregroundStyle(DesignTokens.Colors.separator)
+                AxisValueLabel {
+                    if let frequency = value.as(Double.self) {
+                        Text(frequencyLabel(frequency))
+                    }
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: yGridLines.map(\.value)) { value in
+                AxisGridLine().foregroundStyle(DesignTokens.Colors.separator)
+                AxisValueLabel {
+                    if let db = value.as(Double.self) {
+                        Text(dbLabel(db))
+                    }
+                }
+            }
         }
         .accessibilityElement()
         .accessibilityLabel("AutoEQ correction curve")
@@ -87,137 +130,21 @@ struct AutoEQCurveView: View {
         }
     }
 
-    // MARK: - Drawing
+    // MARK: - Labels
 
-    private func drawGrid(context: inout GraphicsContext, size: CGSize) {
-        let plotRect = CGRect(origin: .zero, size: size)
-        let gridColor = DesignTokens.Colors.separator
-
-        // Vertical grid lines (frequency)
-        for line in xGridLines {
-            let x = xPosition(forFrequency: line.value, in: plotRect)
-            var path = Path()
-            path.move(to: CGPoint(x: x, y: 0))
-            path.addLine(to: CGPoint(x: x, y: size.height))
-            context.stroke(path, with: .color(gridColor), lineWidth: 0.5)
-        }
-
-        // Horizontal grid lines (dB)
-        for line in yGridLines where line.value != 0 {
-            let y = yPosition(forDB: line.value, in: plotRect)
-            var path = Path()
-            path.move(to: CGPoint(x: 0, y: y))
-            path.addLine(to: CGPoint(x: size.width, y: y))
-            context.stroke(path, with: .color(gridColor), lineWidth: 0.5)
-        }
+    private func frequencyLabel(_ frequency: Double) -> String {
+        (xGridLines.first { $0.value == frequency }?.label ?? "") + " Hz"
     }
 
-    private func drawZeroLine(context: inout GraphicsContext, size: CGSize) {
-        let zeroY = yPosition(forDB: 0, in: CGRect(origin: .zero, size: size))
-        var path = Path()
-        path.move(to: CGPoint(x: 0, y: zeroY))
-        path.addLine(to: CGPoint(x: size.width, y: zeroY))
-        context.stroke(
-            path,
-            with: .color(DesignTokens.Colors.textTertiary),
-            style: StrokeStyle(lineWidth: 0.75, dash: [3, 2])
-        )
+    private func dbLabel(_ db: Double) -> String {
+        yGridLines.first { $0.value == db }?.label ?? ""
     }
+}
 
-    private func drawCurve(context: inout GraphicsContext, size: CGSize) {
-        let plotRect = CGRect(origin: .zero, size: size)
-        let points = curvePoints(in: plotRect)
-        guard points.count > 1 else { return }
-
-        let accent = DesignTokens.Colors.accentPrimary
-        let curveOpacity = isCorrectionEnabled ? 1.0 : 0.45
-        let fillOpacity = isCorrectionEnabled ? 0.20 : 0.08
-
-        // Stroked curve path.
-        var stroke = Path()
-        stroke.move(to: points[0])
-        for p in points.dropFirst() {
-            stroke.addLine(to: p)
-        }
-        context.stroke(
-            stroke,
-            with: .color(accent.opacity(curveOpacity)),
-            style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
-        )
-
-        // Filled area: curve down to 0 dB line, gradient toward the curve.
-        // Filling toward the 0-dB baseline (rather than the bottom of the
-        // canvas) keeps the visual emphasis on deviation from flat.
-        let zeroY = yPosition(forDB: 0, in: plotRect)
-        var fill = Path()
-        fill.move(to: CGPoint(x: points.first!.x, y: zeroY))
-        for p in points {
-            fill.addLine(to: p)
-        }
-        fill.addLine(to: CGPoint(x: points.last!.x, y: zeroY))
-        fill.closeSubpath()
-        context.fill(fill, with: .color(accent.opacity(fillOpacity)))
-    }
-
-    private func drawAxisLabels(context: inout GraphicsContext, size: CGSize) {
-        let plotRect = CGRect(origin: .zero, size: size)
-        let labelColor = DesignTokens.Colors.textTertiary
-
-        // X labels along the bottom.
-        for line in xGridLines {
-            let x = xPosition(forFrequency: line.value, in: plotRect)
-            let text = Text(line.label + " Hz")
-                .font(.system(size: 8, weight: .medium))
-                .foregroundColor(labelColor)
-            context.draw(
-                text,
-                at: CGPoint(x: x + 3, y: size.height - 8),
-                anchor: .leading
-            )
-        }
-
-        // Y labels along the left edge.
-        for line in yGridLines {
-            let y = yPosition(forDB: line.value, in: plotRect)
-            let text = Text(line.label)
-                .font(.system(size: 8, weight: .medium))
-                .foregroundColor(labelColor)
-            context.draw(
-                text,
-                at: CGPoint(x: 4, y: y - 1),
-                anchor: .leading
-            )
-        }
-    }
-
-    // MARK: - Geometry helpers
-
-    private func xPosition(forFrequency f: Double, in rect: CGRect) -> CGFloat {
-        let logF = log10(f)
-        let logMin = log10(minFrequency)
-        let logMax = log10(maxFrequency)
-        let normalized = (logF - logMin) / (logMax - logMin)
-        return rect.minX + CGFloat(normalized) * rect.width
-    }
-
-    private func yPosition(forDB db: Double, in rect: CGRect) -> CGFloat {
-        let clamped = min(max(db, dbRange.lowerBound), dbRange.upperBound)
-        let normalized = (clamped - dbRange.lowerBound) / (dbRange.upperBound - dbRange.lowerBound)
-        // Flip Y: high dB at top.
-        return rect.maxY - CGFloat(normalized) * rect.height
-    }
-
-    private func curvePoints(in rect: CGRect) -> [CGPoint] {
-        let frequencies = self.frequencies
-        let response = self.response
-        guard frequencies.count == response.count else { return [] }
-        return zip(frequencies, response).map { f, db in
-            CGPoint(
-                x: xPosition(forFrequency: f, in: rect),
-                y: yPosition(forDB: db, in: rect)
-            )
-        }
-    }
+private struct CurvePoint: Identifiable {
+    let frequency: Double
+    let db: Double
+    var id: Double { frequency }
 }
 
 // MARK: - Previews
