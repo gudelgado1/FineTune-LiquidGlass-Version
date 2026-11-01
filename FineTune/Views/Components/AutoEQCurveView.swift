@@ -72,6 +72,8 @@ struct AutoEQCurveView: View {
             drawCurve(context: &context, size: size)
             drawAxisLabels(context: &context, size: size)
         }
+        .accessibilityElement()
+        .accessibilityLabel("AutoEQ correction curve")
         .frame(height: 130)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

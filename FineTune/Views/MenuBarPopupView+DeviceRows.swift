@@ -340,24 +340,15 @@ extension MenuBarPopupView {
 
     @ViewBuilder
     var emptyStateView: some View {
-        HStack {
-            Spacer()
-            VStack(spacing: DesignTokens.Spacing.sm) {
-                Image(systemName: "speaker.slash")
-                    .font(.title)
-                    .foregroundStyle(DesignTokens.Colors.textTertiary)
-                Text("No apps playing audio")
-                    .font(.callout)
-                    .foregroundStyle(DesignTokens.Colors.textSecondary)
-
-                let ignoredCount = audioEngine.settingsManager.getIgnoredAppInfo().count
-                if ignoredCount > 0 {
-                    Text("\(ignoredCount) ignored · edit to manage")
-                        .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(DesignTokens.Colors.textTertiary)
-                }
+        let ignoredCount = audioEngine.settingsManager.getIgnoredAppInfo().count
+        ContentUnavailableView {
+            Label("No apps playing audio", systemImage: "speaker.slash")
+                .font(.callout)
+        } description: {
+            if ignoredCount > 0 {
+                Text("\(ignoredCount) ignored · edit to manage")
+                    .font(DesignTokens.Typography.caption)
             }
-            Spacer()
         }
         .padding(.vertical, DesignTokens.Spacing.xl)
     }
