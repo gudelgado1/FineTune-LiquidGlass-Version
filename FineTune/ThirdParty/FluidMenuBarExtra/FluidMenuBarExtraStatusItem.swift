@@ -108,15 +108,7 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
         }
 
         globalEventMonitor = GlobalEventMonitor(mask: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            if let window = self?.window, window.isKeyWindow {
-                // Resign key window status if a external non-activating event is triggered,
-                // such as other system status bar menus.
-                window.resignKey()
-            }
-            // An open popover holds key, so the popup never receives its own resign.
-            else if let self, self.window.childWindows?.contains(where: \.isKeyWindow) == true {
-                self.dismissWindow()
-            }
+            self?.handleOutsideMouseDown()
         }
 
         window.delegate = self
@@ -129,6 +121,17 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
     }
 
     /// Shared by the actual local event monitor and the event-chain regression.
+    /// Clicks in other apps or status menus close the popup. When an open popover
+    /// holds key, or just released it elsewhere, the popup has no resign of its own.
+    func handleOutsideMouseDown() {
+        guard window.isVisible else { return }
+        if window.isKeyWindow {
+            window.resignKey()
+        } else {
+            dismissWindow()
+        }
+    }
+
     func handleStatusItemMouseDown(_ event: NSEvent) -> NSEvent? {
         if let button = self.statusItem.button,
            event.window == button.window

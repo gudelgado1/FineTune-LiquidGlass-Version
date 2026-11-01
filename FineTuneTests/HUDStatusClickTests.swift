@@ -87,4 +87,20 @@ import Testing
         #expect(opens == (route == "inside" ? 1 : 0))
         #expect(anchor.isPopupVisible == (route == "inside"))
     }
+
+    @Test("an outside click closes a visible popup that lost key to its popover")
+    func outsideClickClosesPopupWithoutKey() async {
+        let window = FluidMenuBarExtraWindow(title: "Outside click") { Color.clear }
+        let item = FluidMenuBarExtraStatusItem(title: "Outside click", image: .systemNamed("speaker"), window: window)
+        defer { item.isVisible = false; window.close() }
+        window.alphaValue = 0
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        window.orderBack(nil)
+        #expect(window.isVisible && !window.isKeyWindow)
+
+        item.handleOutsideMouseDown()
+
+        try? await Task.sleep(for: .milliseconds(400))
+        #expect(!window.isVisible)
+    }
 }
