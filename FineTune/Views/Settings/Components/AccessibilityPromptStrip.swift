@@ -22,7 +22,7 @@ struct AccessibilityPromptStrip: View {
     var body: some View {
         HStack(spacing: DesignTokens.Spacing.sm) {
             Image(systemName: showingGrantedFlourish ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(.callout, weight: .medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(iconColor)
                 .frame(width: 28, alignment: .center)
@@ -43,7 +43,7 @@ struct AccessibilityPromptStrip: View {
                     HStack(spacing: 3) {
                         Text("Grant")
                         Image(systemName: "arrow.up.right.square")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                     }
                     .font(DesignTokens.Typography.pickerText)
                     .foregroundStyle(DesignTokens.Colors.accentPrimary)
@@ -71,7 +71,7 @@ struct AccessibilityPromptStrip: View {
                 .fill(DesignTokens.Colors.vuGreen)
                 .frame(width: 5, height: 5)
             Text("Granted")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(.caption, weight: .semibold))
                 .foregroundStyle(DesignTokens.Colors.textSecondary)
         }
         .padding(.horizontal, 6)

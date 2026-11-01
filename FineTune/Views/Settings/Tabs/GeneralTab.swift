@@ -33,7 +33,7 @@ struct GeneralTab: View {
 
             if let error = backupErrorMessage {
                 Text(error)
-                    .font(.system(size: 11))
+                    .font(.subheadline)
                     .foregroundStyle(.red)
                     .padding(.horizontal, 4)
             }

@@ -32,7 +32,7 @@ struct MediaKeyOfflineCard: View {
                 Button(action: onRetry) {
                     HStack(spacing: DesignTokens.Spacing.xs) {
                         Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                         Text("Retry")
                     }
                     .font(DesignTokens.Typography.pickerText)

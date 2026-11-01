@@ -172,7 +172,7 @@ private struct HotkeyRow: View {
                         refreshTick &+= 1
                     } label: {
                         Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(.caption, weight: .semibold))
                             .foregroundStyle(
                                 isResetHovered
                                     ? Color.primary

@@ -68,7 +68,7 @@ struct AudioOverviewCard: View {
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
-        .font(.system(size: 13))
+        .font(.body)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
     }

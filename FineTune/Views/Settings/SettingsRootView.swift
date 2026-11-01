@@ -14,7 +14,8 @@ struct SettingsRootView: View {
     let shortcutsRegistry: ShortcutsRegistry
     @ObservedObject var updateManager: UpdateManager
 
-    @State private var selection: SettingsPage = .general
+    // Reopening Settings returns to the last pane, per the HIG.
+    @AppStorage("settings.lastPage") private var selection: SettingsPage = .general
     @AppStorage("settings.showHelp") private var showHelp = true
 
     var body: some View {
@@ -119,10 +120,9 @@ struct SettingsLayout<Content: View>: View {
         }
         .frame(minWidth: 920, minHeight: 640)
         .background(SettingsStyle.header)
-        .tint(.blue)
         .environment(\.settingsShowsHelp, showHelp)
         .ignoresSafeArea(.container, edges: .top)
-        .background(SettingsWindowChromeBridge())
+        .background(SettingsWindowChromeBridge(title: selection.title))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings.root")
     }
@@ -168,10 +168,10 @@ struct SettingsLayout<Content: View>: View {
                         HStack(spacing: 12) {
                             Image(systemName: page.symbol)
                                 .font(.system(size: 18, weight: .regular))
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(.tint)
                                 .frame(width: 26)
                             Text(page.title)
-                                .font(.system(size: 14, weight: selection == page ? .medium : .regular))
+                                .font(.system(.body, weight: selection == page ? .medium : .regular))
                                 .foregroundStyle(.primary)
                             Spacer(minLength: 0)
                             if attentionPages.contains(page) {
@@ -208,19 +208,19 @@ struct SettingsLayout<Content: View>: View {
             Toggle("Show help", isOn: $showHelp)
                 .toggleStyle(.switch)
                 .controlSize(.small)
-                .font(.system(size: 12))
+                .font(.callout)
                 .padding(.horizontal, 22)
                 .padding(.bottom, 18)
                 .accessibilityIdentifier("settings.showHelp")
             Divider()
             HStack(spacing: 8) {
-                Image(systemName: "waveform").foregroundStyle(.blue)
+                Image(systemName: "waveform").foregroundStyle(.tint)
                 Text("FineTune").fontWeight(.medium)
                 Spacer()
                 Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
                     .foregroundStyle(.secondary)
             }
-            .font(.system(size: 11))
+            .font(.subheadline)
             .padding(18)
         }
         .modifier(SettingsNavigationSurface(cornerRadius: 22, fallback: SettingsStyle.sidebar))
@@ -234,11 +234,11 @@ struct SettingsLayout<Content: View>: View {
                 VStack(spacing: 8) {
                     Image(systemName: selection.symbol)
                         .font(.system(size: 34, weight: .regular))
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(.tint)
                     Text(selection.title)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(.title3, weight: .semibold))
                     Text(selection.subtitle)
-                        .font(.system(size: 12))
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.top, 14)
@@ -251,13 +251,19 @@ struct SettingsLayout<Content: View>: View {
 }
 
 private struct SettingsWindowChromeBridge: NSViewRepresentable {
+    let title: String
+
     func makeNSView(context: Context) -> SettingsWindowChromeView { SettingsWindowChromeView() }
-    func updateNSView(_ nsView: SettingsWindowChromeView, context: Context) { nsView.apply() }
+    func updateNSView(_ nsView: SettingsWindowChromeView, context: Context) {
+        nsView.title = title
+        nsView.apply()
+    }
 }
 
 private final class SettingsWindowChromeView: NSView {
     private var trafficLights: [NSButton] = []
     private var trafficLightLayoutScheduled = false
+    var title = "FineTune Settings"
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
@@ -277,10 +283,10 @@ private final class SettingsWindowChromeView: NSView {
 
     func apply() {
         guard let window else { return }
-        window.title = "FineTune Settings"
+        window.title = title
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.styleMask.formUnion([.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView])
+        window.styleMask.formUnion([.titled, .closable, .resizable, .fullSizeContentView])
         window.titlebarSeparatorStyle = .none
         // Reserve a native titlebar tall enough for the inset traffic lights.
         let toolbarID = NSToolbar.Identifier("FineTune.Settings")
@@ -296,8 +302,11 @@ private final class SettingsWindowChromeView: NSView {
         window.isMovableByWindowBackground = false
         window.standardWindowButton(.closeButton)?.isHidden = false
         window.standardWindowButton(.closeButton)?.setAccessibilityIdentifier("settings.close")
+        // Settings reopens instantly with ⌘, so minimize and zoom stay dimmed (HIG).
         window.standardWindowButton(.miniaturizeButton)?.isHidden = false
+        window.standardWindowButton(.miniaturizeButton)?.isEnabled = false
         window.standardWindowButton(.zoomButton)?.isHidden = false
+        window.standardWindowButton(.zoomButton)?.isEnabled = false
         observeTrafficLights(in: window)
         scheduleTrafficLightLayout()
     }

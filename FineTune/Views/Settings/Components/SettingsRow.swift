@@ -26,8 +26,8 @@ struct SettingsRow<Trailing: View>: View {
             HStack(alignment: .center, spacing: 16) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 16))
-                        .foregroundStyle(.blue)
+                        .font(.title3)
+                        .foregroundStyle(.tint)
                         .frame(width: 22)
                         .accessibilityHidden(true)
                 }

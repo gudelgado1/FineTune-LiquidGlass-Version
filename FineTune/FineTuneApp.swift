@@ -125,7 +125,6 @@ struct FineTuneApp: App {
 
     private func openCustomSettingsWindow() {
         if let window = customSettingsWindow {
-            window.center()
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -137,7 +136,7 @@ struct FineTuneApp: App {
 
         let window = SettingsPanel(
             contentRect: NSRect(x: 0, y: 0, width: 1000, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -150,6 +149,7 @@ struct FineTuneApp: App {
         window.collectionBehavior = [.fullScreenAuxiliary]
         window.minSize = NSSize(width: 920, height: 640)
         window.center()
+        window.setFrameAutosaveName("FineTune.Settings")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         customSettingsWindow = window

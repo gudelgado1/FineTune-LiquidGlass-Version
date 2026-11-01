@@ -77,14 +77,14 @@ struct UpdatesTab: View {
                 Image(systemName: "arrow.down.circle")
                     .font(.system(size: 28, weight: .regular))
                     .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(.tint)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("FineTune \(versionShort)")
                         .font(.system(.title3, weight: .semibold))
                         .foregroundStyle(DesignTokens.Colors.textPrimary)
                     Text("Build \(buildNumber) · Last checked \(lastCheckDescription)")
-                        .font(.system(size: 11))
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)

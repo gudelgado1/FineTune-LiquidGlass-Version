@@ -32,13 +32,13 @@ struct SettingsSection<Content: View>: View {
                 HStack(spacing: 8) {
                     if let title {
                         Text(title)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.system(.body, weight: .semibold))
                             .foregroundStyle(DesignTokens.Colors.textPrimary)
                     }
                     Spacer(minLength: 0)
                     if let badge {
                         Text(badge)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                             .foregroundStyle(DesignTokens.Colors.textSecondary)
                     }
                 }
