@@ -81,7 +81,9 @@ struct AutoEQSearchPanel: View {
             .frame(minHeight: 18)
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        // The owning device row already supplies the content surface. A nested
+        // SwiftUI Material here changes the outer glass backdrop in our NSPanel.
+        // Keep one backdrop owner while the browser replaces the correction UI.
         .onAppear {
             isActive = true
             refreshEntries()

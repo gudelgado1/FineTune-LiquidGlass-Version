@@ -62,3 +62,42 @@ settings have not been physically certified for this browser. Reduce Motion is
 respected in the browser transitions and keyboard scroll animation. Existing
 Preview 10 audio/blur acceptance remains evidence for that version, not automatic
 acceptance of this new presentation.
+
+## Preview 11 visual regression: nested material
+
+The user reported functional behavior but supplied a recording showing the
+background becoming much sharper when Browse opened, with old controls visible
+during the transition. The original fixed-window lab did not exercise the real
+transparent popup and its content-driven resizing; its visual pass was insufficient.
+
+A second, audio-free fixture used the actual `FluidMenuBarExtraWindow`,
+`RootViewModifier`, `ExpandableGlassRow`, expanded panel and browser over a
+synthetic black/white text backdrop. Explicitly filtered ScreenCaptureKit captures
+included only its owned backdrop and probe. An unchanged header patch at
+(370,25)–(575,100) pixels measured horizontal + vertical mean grayscale differences.
+The local `check-blur.py BEFORE AFTER` loop rejects an increase above 1.5×. It
+failed on the original behavior: 0.900238 → 5.146934 (**5.7173×**); same-image
+negative control passed at 1×. This is a bounded legibility regression signal,
+not a universal glass metric or pixel-identity contract.
+
+One-variable probes disabling native window animation, SwiftUI Browse animation,
+and native search autofocus each retained the same 5.7173× failure. Removing only
+the browser’s `.regularMaterial` wrapper passed at 0.9777×. The production fix
+removes that wrapper: the device row already supplies the content surface, while
+the main popup remains the backdrop owner. No fixed blur radius or private glass
+API was introduced. This establishes the wrapper as the trigger in this fixture;
+it does not establish the compositor’s undocumented internal mechanism.
+
+The actual corrected source, without component probe overrides, passed still
+captures in light (0.3332× after opening, 1.0000× after returning) and dark
+(0.1850× after opening). The material need not look pixel-identical as the panel
+changes height; the observed unwanted gain in background detail is eliminated.
+A separate temporal capture lost the probe after resizing and was excluded from
+acceptance evidence. Full motion/ghosting still requires the real-popup retest.
+
+Targeted isolated run `20261101-202416-147639`: six browser/editor/offline cases
+passed. The earlier 1026-case CI at `161abb1` passed and its artifact/tree were
+verified before this material fix; do not label that run as testing this fix.
+The compositor regression is covered by the local owned-lab capture loop, not a
+unit test pretending to verify GPU output. Preview 12 physical acceptance remains
+pending. Release publication was explicitly deferred by the user.
