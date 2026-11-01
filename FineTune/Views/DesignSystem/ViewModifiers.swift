@@ -33,8 +33,6 @@ struct SectionHeaderStyleModifier: ViewModifier {
         content
             .font(DesignTokens.Typography.sectionHeader)
             .foregroundStyle(DesignTokens.Colors.sectionHeaderText)
-            .tracking(DesignTokens.Typography.sectionHeaderTracking)
-            .textCase(.uppercase)
     }
 }
 

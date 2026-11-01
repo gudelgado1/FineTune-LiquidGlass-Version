@@ -397,23 +397,18 @@ struct MenuBarPopupView: View {
         // Section spacing tracks the chosen popup density (compact/comfortable/spacious).
         VStack(alignment: .leading, spacing: popupDimensions.sectionSpacing) {
             devicesSection
-
-            Divider()
-                .padding(.vertical, DesignTokens.Spacing.xs)
+                .padding(.bottom, DesignTokens.Spacing.sm)
 
             appsSection(scrollProxy: scrollProxy)
-
-            Divider()
-                .padding(.vertical, DesignTokens.Spacing.xs)
 
             // Keep secondary system sounds available after the main app controls.
             if !showingInputDevices && !isEditingDevicePriority
                 && audioEngine.settingsManager.appSettings.showSoundEffectsRow {
                 systemSoundsRow
-
-                Divider()
-                    .padding(.vertical, DesignTokens.Spacing.xs)
             }
+
+            Divider()
+                .padding(.vertical, DesignTokens.Spacing.xs)
 
             // Footer: support link + quit
             HStack {
@@ -424,7 +419,7 @@ struct MenuBarPopupView: View {
                 }
                 .buttonStyle(.plain)
                 .font(.system(.callout, weight: .regular))
-                .foregroundStyle(isSupportHovered ? Color(nsColor: .systemPink) : DesignTokens.Colors.textTertiary)
+                .foregroundStyle(isSupportHovered ? Color(nsColor: .systemPink) : DesignTokens.Colors.textSecondary)
                 .onHover { hovering in
                     withAnimation(DesignTokens.Animation.hover) {
                         isSupportHovered = hovering

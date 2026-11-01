@@ -322,12 +322,10 @@ enum DesignTokens {
 
     enum Typography {
         /// Uppercase section label (e.g. "APPS", "OUTPUT DEVICES").
-        /// caption + semibold + tracking matches native macOS sidebar headers.
-        static let sectionHeader = Font.system(.caption, weight: .semibold)
+        /// subheadline + semibold in sentence case, like native macOS section headers.
+        static let sectionHeader = Font.system(.subheadline, weight: .semibold)
 
         /// Letter-spacing for section headers — tighter than before to feel
-        /// lighter without losing readability.
-        static let sectionHeaderTracking: CGFloat = 0.8
 
         /// Primary row label — app / device name at rest.
         static let rowName = Font.body
@@ -426,6 +424,14 @@ enum DesignTokens {
 
         /// Slider width
         static let sliderWidth: CGFloat = 140
+
+        /// Leading inset that aligns a 28pt device badge's trailing edge with an
+        /// app row's VU meter + spacing + 24pt icon, so row names share a column.
+        static let badgeRowLeadingInset: CGFloat = 14
+
+        /// Trailing column reserved by rows without boost and output controls,
+        /// so every volume slider in the popup shares the same start and end.
+        static let rowAccessoryWidth: CGFloat = 60
 
         /// Percentage text width (fixed to prevent layout shift)
         static let percentageWidth: CGFloat = 40

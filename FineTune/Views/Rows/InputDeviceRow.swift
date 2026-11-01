@@ -84,6 +84,7 @@ struct InputDeviceRow: View {
     private var deviceHeader: some View {
         HStack(spacing: DesignTokens.Spacing.sm) {
             DeviceBadge(icon: device.icon, isSelected: isDefault, fallbackSymbol: "mic", overrideSymbol: iconOverride)
+                .padding(.leading, DesignTokens.Dimensions.badgeRowLeadingInset)
 
             // Device name
             Text(device.name)
@@ -114,6 +115,7 @@ struct InputDeviceRow: View {
                     isEditing = editing
                 }
             )
+            .frame(width: DesignTokens.Dimensions.sliderWidth)
             .opacity(showMutedIcon ? 0.5 : 1.0)
             .onChange(of: sliderValue) { _, newValue in
                 // Skip write-back when syncing from device (breaks USB DAC quantization spiral)
@@ -147,6 +149,8 @@ struct InputDeviceRow: View {
             .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
             .clipped()
             .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
+
+            Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)
         }
         .frame(height: DesignTokens.Dimensions.rowContentHeight)
         .onHover { hovering in

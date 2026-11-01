@@ -90,6 +90,7 @@ struct SystemSoundsRow: View {
             HStack(spacing: DesignTokens.Spacing.sm) {
                 // Leading bell badge — marks this as the system alert/effects channel.
                 DeviceBadge(icon: nil, isSelected: false, fallbackSymbol: "bell.fill")
+                    .padding(.leading, DesignTokens.Dimensions.badgeRowLeadingInset)
 
                 // Name + chevron — tapping toggles the inline device selector, the
                 // same motion as the per-app EQ and per-device AutoEQ panels.
@@ -137,6 +138,7 @@ struct SystemSoundsRow: View {
                     value: $sliderValue,
                     onEditingChanged: { editing in isEditing = editing }
                 )
+                .frame(width: DesignTokens.Dimensions.sliderWidth)
                 .opacity(showMutedIcon ? 0.5 : 1.0)
                 .onChange(of: sliderValue) { _, newValue in
                     if isUpdatingSliderFromExternal {
@@ -161,6 +163,8 @@ struct SystemSoundsRow: View {
                 .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
                 .clipped()
                 .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
+
+                Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)
             }
             .frame(height: DesignTokens.Dimensions.rowContentHeight)
             .onChange(of: alertVolume) { _, newValue in

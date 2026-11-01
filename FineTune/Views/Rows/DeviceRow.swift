@@ -191,6 +191,7 @@ struct DeviceRow: View {
             // badge plus bold device name; the row-level gesture in `body`
             // handles tap-to-set-default.
             DeviceBadge(icon: device.icon, isSelected: isDefault, overrideSymbol: iconOverride)
+                .padding(.leading, DesignTokens.Dimensions.badgeRowLeadingInset)
 
             // Device name + optional AutoEQ profile subtitle.
             // For AutoEQ-capable devices the name area also acts as the
@@ -272,6 +273,7 @@ struct DeviceRow: View {
                     isEditing = editing
                 }
             )
+            .frame(width: DesignTokens.Dimensions.sliderWidth)
             .opacity(showMutedIcon ? 0.5 : 1.0)
             .onChange(of: sliderValue) { _, newValue in
                 // Skip write-back when syncing from device (breaks USB DAC quantization spiral)
@@ -309,6 +311,8 @@ struct DeviceRow: View {
             .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
             .clipped()
             .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
+
+            Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)
         }
         .frame(height: DesignTokens.Dimensions.rowContentHeight)
         .onHover { hovering in
