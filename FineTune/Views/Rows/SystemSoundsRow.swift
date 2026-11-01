@@ -101,7 +101,7 @@ struct SystemSoundsRow: View {
                             .help("Sound Effects")
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(
                                 isExpanded
                                     ? DesignTokens.Colors.accentPrimary
@@ -113,7 +113,7 @@ struct SystemSoundsRow: View {
 
                     if let subtitle = routingSubtitle {
                         Text(subtitle)
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(DesignTokens.Colors.textTertiary)
                             .lineLimit(1)
                     }

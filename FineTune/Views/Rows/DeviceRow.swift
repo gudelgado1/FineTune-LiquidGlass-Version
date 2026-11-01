@@ -211,7 +211,7 @@ struct DeviceRow: View {
                             // Rotates 90° when open — same motion vocabulary
                             // as the EQ button and the DeviceEditRow info button.
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(
                                     isAutoEQExpanded
                                         ? DesignTokens.Colors.accentPrimary
@@ -224,7 +224,7 @@ struct DeviceRow: View {
 
                     if let subtitle = Self.autoEQSubtitle(profileName: autoEQProfileName, isEnabled: autoEQEnabled) {
                         Text(subtitle)
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(DesignTokens.Colors.textTertiary)
                             .lineLimit(1)
                     }

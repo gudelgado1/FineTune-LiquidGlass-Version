@@ -137,7 +137,7 @@ struct InactiveAppRow: View {
                             .foregroundStyle(DesignTokens.Colors.textPrimary)
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(
                                 isEQExpanded
                                     ? DesignTokens.Colors.accentPrimary
@@ -155,7 +155,7 @@ struct InactiveAppRow: View {
                         mode: deviceSelectionMode
                     ) {
                         Text(subtitle)
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(DesignTokens.Colors.textTertiary)
                             .lineLimit(1)
                     }

@@ -114,7 +114,7 @@ struct EQSliderView: View {
                             // dB value label (appears during drag)
                             if isDragging {
                                 Text(formatGain(localGain))
-                                    .font(.system(size: 9, weight: .medium).monospacedDigit())
+                                    .font(.system(size: 10, weight: .medium).monospacedDigit())
                                     .foregroundStyle(DesignTokens.Colors.textPrimary)
                                     .fixedSize()
                                     .position(x: geo.size.width / 2, y: thumbY - thumbSize / 2 - 10)

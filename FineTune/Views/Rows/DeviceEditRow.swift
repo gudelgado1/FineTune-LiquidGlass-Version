@@ -107,7 +107,7 @@ struct DeviceEditRow<ExpandedContent: View>: View {
 
                 if isDefault {
                     Text("DEFAULT")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(DesignTokens.Colors.textSecondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)

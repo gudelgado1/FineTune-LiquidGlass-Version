@@ -346,7 +346,7 @@ enum DesignTokens {
         static let pickerText = Font.subheadline        // 11 pt
 
         /// EQ frequency axis labels — kept at 9 pt because the graph is dense.
-        static let eqLabel = Font.system(size: 9, weight: .medium, design: .monospaced)
+        static let eqLabel = Font.system(size: 10, weight: .medium, design: .monospaced)
 
         /// Settings row helper description.
         static let rowDescription = Font.footnote       // 10 pt
@@ -417,7 +417,7 @@ enum DesignTokens {
         static let sliderThumbSize: CGFloat = 12
 
         /// Minimum touch target
-        static let minTouchTarget: CGFloat = 16
+        static let minTouchTarget: CGFloat = 24
 
         /// Row content height
         static let rowContentHeight: CGFloat = 28
