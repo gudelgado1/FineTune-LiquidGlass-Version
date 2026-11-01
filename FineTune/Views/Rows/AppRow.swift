@@ -226,11 +226,11 @@ struct AppRow: View {
                 settings: $localEQSettings,
                 userPresets: userPresets,
                 onPresetSelected: { preset in
-                    localEQSettings = preset.settings
-                    onEQChange(preset.settings)
+                    localEQSettings = localEQSettings.applyingCurve(from: preset.settings)
+                    onEQChange(localEQSettings)
                 },
                 onUserPresetSelected: { userPreset in
-                    localEQSettings = userPreset.settings
+                    localEQSettings = localEQSettings.applyingCurve(from: userPreset.settings)
                     onUserPresetSelected(userPreset)
                 },
                 onSettingsChanged: { settings in

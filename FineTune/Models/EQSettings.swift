@@ -53,4 +53,11 @@ nonisolated struct EQSettings: Codable, Equatable {
 
     /// Flat EQ preset
     static let flat = EQSettings()
+
+    /// Presets select a curve; the app owns the enabled/bypassed state.
+    func applyingCurve(from preset: EQSettings) -> EQSettings {
+        var result = self
+        result.bandGains = preset.bandGains
+        return result
+    }
 }
