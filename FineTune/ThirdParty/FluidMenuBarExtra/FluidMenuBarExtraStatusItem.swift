@@ -113,6 +113,10 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
                 // such as other system status bar menus.
                 window.resignKey()
             }
+            // An open popover holds key, so the popup never receives its own resign.
+            else if let self, self.window.childWindows?.contains(where: \.isKeyWindow) == true {
+                self.dismissWindow()
+            }
         }
 
         window.delegate = self
@@ -207,6 +211,8 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        // A popover opened from the popup takes key; keep the popup behind it.
+        if NSApp.isActive, window.childWindows?.contains(where: \.isVisible) == true { return }
         globalEventMonitor?.stop()
         dismissWindow()
     }

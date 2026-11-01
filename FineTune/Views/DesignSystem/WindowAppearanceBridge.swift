@@ -64,7 +64,7 @@ final class WindowAppearanceTrackerView: NSView {
 /// their own `NSPanel.appearance` and `.preferredColorScheme(...)`.
 ///
 /// Set at popup / HUD roots (`MenuBarPopupView`, `HUDWindowController`) so
-/// nested pickers (`PopoverHost` consumers) can wire it through without each
+/// nested pickers (`.popover` consumers) can wire it through without each
 /// intermediate view threading a binding to `appSettings`.
 private struct AppearancePreferenceKey: EnvironmentKey {
     static let defaultValue: AppearancePreference = .system
