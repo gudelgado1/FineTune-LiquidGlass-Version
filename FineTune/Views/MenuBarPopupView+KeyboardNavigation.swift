@@ -20,12 +20,16 @@ extension MenuBarPopupView {
     }
 
     func syncNavOrder() {
-        let activeDevices = showingInputDevices ? sortedInputDevices : sortedDevices
+        let activeDevices = showingInputDevices ? sortedInputDevices : visibleOutputDevices
         navModel.syncOrder(
             activeDevices: activeDevices,
             appPersistenceIDs: audioEngine.displayableApps.map(\.id),
             isEditingPriority: isEditingDevicePriority
         )
+        if let selectedRow, !navModel.orderedRowIDs.contains(selectedRow) {
+            self.selectedRow = hasKeyboardEngaged
+                ? navModel.defaultFocus(defaultOutputUID: currentDefaultDeviceUID()) : nil
+        }
     }
 
     func currentDefaultDeviceUID() -> String? {

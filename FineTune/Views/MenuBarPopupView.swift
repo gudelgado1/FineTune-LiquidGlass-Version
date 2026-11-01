@@ -68,6 +68,8 @@ struct MenuBarPopupView: View {
 
     /// Which device tab is selected (false = output, true = input)
     @State var showingInputDevices = false
+    /// Alternatives are disclosed on demand so apps stay near the active output.
+    @State var showingOtherOutputs = false
 
     /// Track which app has its EQ panel expanded (only one at a time)
     /// Uses DisplayableApp.id (String) to work with both active and inactive apps
@@ -157,7 +159,9 @@ struct MenuBarPopupView: View {
                         .font(.subheadline)
                         .foregroundStyle(DesignTokens.Colors.textSecondary)
                 } else {
-                    defaultDevicesStatus
+                    Text("FineTune")
+                        .font(.headline)
+                        .accessibilityIdentifier("popup.title")
                 }
                 Spacer()
                 editPriorityButton
@@ -245,6 +249,11 @@ struct MenuBarPopupView: View {
         }
         .onChange(of: deviceVolumeMonitor.defaultDeviceID) { _, _ in
             updateSortedDevices()
+            if !showingInputDevices && !isEditingDevicePriority {
+                setShowingOtherOutputs(false)
+            } else {
+                syncNavOrder()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
             // Global notification — fires for every window in the process. Filter to
@@ -374,6 +383,8 @@ struct MenuBarPopupView: View {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 expandedRowID = nil
             }
+        } else if showingOtherOutputs && !showingInputDevices {
+            setShowingOtherOutputs(false)
         } else {
             NSApp.keyWindow?.resignKey()
         }
@@ -401,9 +412,12 @@ struct MenuBarPopupView: View {
             Divider()
                 .padding(.vertical, DesignTokens.Spacing.xs)
 
-            // Sound effects (system alert volume) sits between the device and app
-            // sections, bracketed by matching section dividers. Output tab only,
-            // hidden while reordering, and only when the user keeps it enabled.
+            appsSection(scrollProxy: scrollProxy)
+
+            Divider()
+                .padding(.vertical, DesignTokens.Spacing.xs)
+
+            // Keep secondary system sounds available after the main app controls.
             if !showingInputDevices && !isEditingDevicePriority
                 && audioEngine.settingsManager.appSettings.showSoundEffectsRow {
                 systemSoundsRow
@@ -411,11 +425,6 @@ struct MenuBarPopupView: View {
                 Divider()
                     .padding(.vertical, DesignTokens.Spacing.xs)
             }
-
-            appsSection(scrollProxy: scrollProxy)
-
-            Divider()
-                .padding(.vertical, DesignTokens.Spacing.xs)
 
             // Footer: support link + quit
             HStack {
@@ -506,52 +515,6 @@ struct MenuBarPopupView: View {
         .help(audioSystemDown
               ? "Audio system isn't responding — reset Core Audio in Settings"
               : "Rebuild app capture — use if an app's volume stops working or it's missing from the list")
-    }
-
-    // MARK: - Default Devices Status
-
-    /// Name of the current default output device
-    private var defaultOutputDeviceName: String {
-        guard let uid = deviceVolumeMonitor.defaultDeviceUID,
-              let device = sortedDevices.first(where: { $0.uid == uid }) else {
-            return "No Output"
-        }
-        return device.name
-    }
-
-    /// Name of the current default input device
-    private var defaultInputDeviceName: String {
-        guard let uid = deviceVolumeMonitor.defaultInputDeviceUID,
-              let device = sortedInputDevices.first(where: { $0.uid == uid }) else {
-            return "No Input"
-        }
-        return device.name
-    }
-
-    /// Pill showing both default devices in the header center.
-    private var defaultDevicesStatus: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "speaker.wave.2.fill")
-                .font(.system(size: 10))
-            Text(defaultOutputDeviceName)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Text("·")
-                .foregroundStyle(DesignTokens.Colors.textTertiary)
-
-            Image(systemName: "mic.fill")
-                .font(.system(size: 10))
-            Text(defaultInputDeviceName)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .font(.subheadline)
-        .foregroundStyle(DesignTokens.Colors.textSecondary)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .glassChip(in: Capsule())
-        .overlay(Capsule().strokeBorder(DesignTokens.Colors.glassRowBorder, lineWidth: 0.5))
     }
 
     // MARK: - Device Tab Toggle
