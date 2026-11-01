@@ -122,6 +122,7 @@ struct MenuBarPopupView: View {
     @State var navModel = PopupKeyboardNavModel()
     /// Delivers digits typed on the keyboard-selected row to that row's editor.
     @State var textEntry = PopupTextEntryCoordinator()
+    @State var inlineEditor = PopupInlineEditorContext()
     /// Logical keyboard-nav selection. Plain @State (not @FocusState) so reads
     /// and writes are synchronous within a single event handler — using
     /// @FocusState here raced with SwiftUI's auto-focus-on-key-window claim
@@ -191,6 +192,10 @@ struct MenuBarPopupView: View {
         }
         .preferredColorScheme(audioEngine.settingsManager.appSettings.appearance.swiftUIColorScheme)
         .environment(\.appearancePreference, audioEngine.settingsManager.appSettings.appearance)
+        .environment(\.popupInlineEditor, inlineEditor)
+        .onChange(of: inlineEditor.isPresented) { _, presented in
+            if !presented && isPopupVisible { anchorFocused = true }
+        }
         .onAppear {
             updateSortedDevices()
             updateSortedInputDevices()
@@ -266,6 +271,7 @@ struct MenuBarPopupView: View {
             else { return }
             isPopupVisible = false
             popupVisibility.isVisible = false
+            inlineEditor.dismissCurrent()
             hasKeyboardEngaged = false
             selectedRow = nil
         }
@@ -357,6 +363,7 @@ struct MenuBarPopupView: View {
     /// `isEditingDevicePriority` so Escape collapses the row first rather than
     /// tearing down edit mode entirely.
     private func handleEscape() {
+        if inlineEditor.dismissCurrent() { return }
         if expandedDeviceUID != nil {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 expandedDeviceUID = nil

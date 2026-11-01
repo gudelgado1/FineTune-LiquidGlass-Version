@@ -35,6 +35,7 @@ extension MenuBarPopupView {
     }
 
     func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
+        if inlineEditor.isPresented { return .ignored }
         // While editing a text field (e.g. the percentage editor), let Return /
         // arrows / etc. flow to the field editor instead of driving row nav — see
         // `isEditingText`. Fixes: typing a value + Enter closed the popup without

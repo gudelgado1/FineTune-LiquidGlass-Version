@@ -16,6 +16,14 @@ final class AutoEQFetcher {
 
     private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "AutoEQFetcher")
 
+    private let session: URLSession
+    private let cacheRoot: URL
+
+    init(session: URLSession = .shared, cacheDirectory: URL? = nil) {
+        self.session = session
+        self.cacheRoot = cacheDirectory ?? AppDataLocations.applicationSupport
+    }
+
     // MARK: - URLs
 
     private static let indexURL = URL(string: "https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results/INDEX.md")!
@@ -23,15 +31,13 @@ final class AutoEQFetcher {
 
     // MARK: - Cache Paths
 
-    private static var cacheDirectory: URL {
-        AppDataLocations.applicationSupport
-    }
+    private var cacheDirectory: URL { cacheRoot }
 
-    private static var catalogCacheURL: URL {
+    private var catalogCacheURL: URL {
         cacheDirectory.appendingPathComponent("autoeq-catalog.json")
     }
 
-    private static var fetchedProfilesDirectory: URL {
+    private var fetchedProfilesDirectory: URL {
         cacheDirectory.appendingPathComponent("AutoEQ").appendingPathComponent("fetched")
     }
 
@@ -47,6 +53,7 @@ final class AutoEQFetcher {
 
     /// Load catalog from cache first, then refresh from GitHub in the background.
     func loadCatalog() async {
+        guard catalogState != .loading else { return }
         // Try cached catalog first
         if let cached = loadCatalogFromCache() {
             catalog = cached
@@ -68,9 +75,10 @@ final class AutoEQFetcher {
 
     /// Fetch the catalog from GitHub INDEX.md and cache it.
     func refreshCatalogFromGitHub() async {
+        guard catalogState != .loading else { return }
         catalogState = .loading
         do {
-            let (data, response) = try await URLSession.shared.data(from: Self.indexURL)
+            let (data, response) = try await session.data(from: Self.indexURL)
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {
                 catalogState = .error("Failed to fetch catalog")
@@ -92,10 +100,8 @@ final class AutoEQFetcher {
             // Cache to disk
             saveCatalogToCache(entries)
         } catch {
-            // Keep existing cached catalog if we have one
-            if catalog.isEmpty {
-                catalogState = .error("Network error: \(error.localizedDescription)")
-            }
+            // Keep cached entries usable, but finish the loading state and offer retry.
+            catalogState = .error("Network error: \(error.localizedDescription)")
             logger.error("Catalog fetch failed: \(error.localizedDescription)")
         }
     }
@@ -121,7 +127,7 @@ final class AutoEQFetcher {
             throw FetchError.invalidURL
         }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             throw FetchError.profileNotFound(entry.name)
@@ -159,7 +165,7 @@ final class AutoEQFetcher {
 
     /// Check if a profile is already cached locally.
     func hasCachedProfile(id: String) -> Bool {
-        let file = Self.fetchedProfilesDirectory.appendingPathComponent("\(id).txt")
+        let file = fetchedProfilesDirectory.appendingPathComponent("\(id).txt")
         return FileManager.default.fileExists(atPath: file.path)
     }
 
@@ -257,7 +263,7 @@ final class AutoEQFetcher {
     // MARK: - Catalog Cache
 
     private func loadCatalogFromCache() -> [AutoEQCatalogEntry]? {
-        let url = Self.catalogCacheURL
+        let url = catalogCacheURL
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         do {
             let data = try Data(contentsOf: url)
@@ -269,7 +275,7 @@ final class AutoEQFetcher {
     }
 
     private func saveCatalogToCache(_ entries: [AutoEQCatalogEntry]) {
-        let url = Self.catalogCacheURL
+        let url = catalogCacheURL
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(entries)
@@ -280,7 +286,7 @@ final class AutoEQFetcher {
     }
 
     private func isCatalogCacheStale() -> Bool {
-        let url = Self.catalogCacheURL
+        let url = catalogCacheURL
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let modified = attrs[.modificationDate] as? Date else {
             return true
@@ -291,7 +297,7 @@ final class AutoEQFetcher {
     // MARK: - Profile Cache
 
     private func cacheProfileText(_ text: String, id: String) {
-        let dir = Self.fetchedProfilesDirectory
+        let dir = fetchedProfilesDirectory
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let file = dir.appendingPathComponent("\(id).txt")
@@ -308,7 +314,7 @@ final class AutoEQFetcher {
     }
 
     private func loadCachedProfile(id: String, name: String, measuredBy: String) -> AutoEQProfile? {
-        let file = Self.fetchedProfilesDirectory.appendingPathComponent("\(id).txt")
+        let file = fetchedProfilesDirectory.appendingPathComponent("\(id).txt")
         guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
         guard let profile = AutoEQParser.parse(text: text, name: name, source: .fetched, id: id) else { return nil }
         return AutoEQProfile(

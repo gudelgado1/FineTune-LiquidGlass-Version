@@ -35,6 +35,7 @@ final class AutoEQProfileManager {
         for profile in imported {
             profiles[profile.id] = profile
         }
+        rebuildSearchIndex()
 
         // Unit tests use their own profiles and never start background network work.
         guard !AppDataLocations.isUnitTesting else { return }
@@ -49,6 +50,20 @@ final class AutoEQProfileManager {
 
     var catalogState: AutoEQFetcher.FetchState { fetcher.catalogState }
     var catalogEntries: [AutoEQCatalogEntry] { fetcher.catalog }
+
+    /// An explicit Browse action loads the catalog; app startup remains isolated in tests.
+    func loadCatalogForBrowsing(retry: Bool = false) async {
+        guard fetcher.catalogState != .loading else { return }
+        if retry { await fetcher.refreshCatalogFromGitHub() }
+        else { await fetcher.loadCatalog() }
+        rebuildSearchIndex()
+    }
+
+    /// Includes imported profiles, even while the online catalog is unavailable.
+    func refreshBrowserEntries() -> [AutoEQCatalogEntry] {
+        rebuildSearchIndex()
+        return sortedEntries
+    }
 
     func catalogEntry(for id: String) -> AutoEQCatalogEntry? {
         fetcher.catalog.first(where: { $0.id == id })
