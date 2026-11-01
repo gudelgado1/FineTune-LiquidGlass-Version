@@ -1,148 +1,85 @@
 # Releasing FineTune (Liquid Glass Version)
 
-How to cut a new release and ship it through Sparkle auto-update.
+## Signing chains
 
-## How updates work here
+The v2 signing key is stored in the login Keychain under the Sparkle account
+`FineTune-gudelgado1-v2`. Only its public key is in `FineTune/Info.plist`:
+`bbJTWltSeENt5vhQ8dWrgJgtLuqEaKc6a17mWUdW/8I=`.
+The app keeps its existing bundle identifier and settings directories.
 
-- The app is **ad-hoc signed** (no paid Developer ID / no notarization). Users open
-  it the first time with **right-click → Open**.
-- Updates are delivered by **Sparkle** using an **EdDSA (ed25519)** signature:
-  - The app embeds the **public** key in `Info.plist` → `SUPublicEDKey`
-    (`0EhgtQvpW/aizEs/Ii1LLTinU6jMY0/AkcPuRL6mFzQ=`).
-  - The matching **private** key lives only in your **login Keychain** and is used
-    to sign each release.
-  - `Info.plist` → `SUFeedURL` points at
-    `https://raw.githubusercontent.com/gudelgado1/FineTune-LiquidGlass-Version/main/appcast.xml`.
-  - Each release ships a `FineTune.zip` as a **GitHub Release asset**; `appcast.xml`
-    (on `main`) lists it with its signature so the app can verify the download.
+The private key for the legacy releases was lost with the previous Mac. Those
+releases are ad hoc signed, without a Developer ID trust anchor for key rotation.
+Install the new base manually once; the old installation cannot authenticate an
+archive signed only by the new key. See [Sparkle key rotation](https://sparkle-project.org/documentation/#3-segue-for-security-concerns).
 
-```
-app (SUPublicEDKey) ──checks──► appcast.xml (main) ──points to──► GitHub Release asset (FineTune.zip, signed)
-```
+The new base points to `main/appcast-v2.xml` in this fork. The legacy `appcast.xml`
+remains unchanged for existing installations. The v2 feed starts empty: staging
+this configuration does not publish a release. Until the branch is merged, its
+`main` feed URL is not live. Preview launchers disable automatic update checks.
 
-## One-time setup (already done — for reference)
+## Backup and restore
 
-The signing key was created with Sparkle's `generate_keys`. It is **not** in the
-repo. The public key is in `Info.plist`; the private key is in the login Keychain
-as **"Private key for signing Sparkle updates"**.
+The maintainer has an authenticated, password-encrypted v2 backup and a portable
+restore kit outside the repository. Keep the encrypted file and restore kit on
+another device or backup medium as well. A copy only on this Mac does not protect
+against losing this Mac. Keep the password separately; do not put passwords,
+private seeds, or backup archives in Git, Actions artifacts, issues, or logs.
 
-### ⚠️ Back up the private key
+Run `Restaurar-Sparkle.command` from that kit locally on a replacement Mac. It
+asks for the password in the Terminal and restores the named Keychain account
+only after authenticating the backup and matching the public key. It refuses to
+replace a different existing key. The kit includes the Swift source and format
+information; retain them with the encrypted file.
 
-If you lose it you can never sign updates again (you'd have to generate a new key
-and make every user reinstall). Export it and store it somewhere safe **outside the
-repo** (password manager / encrypted backup):
-
-```bash
-SPARKLE_BIN="$(find ~/Library/Developer/Xcode/DerivedData -path '*/artifacts/sparkle/Sparkle/bin' -type d | head -1)"
-"$SPARKLE_BIN/generate_keys" -x ~/Desktop/finetune_sparkle_private_key.txt
-# move that file to safe storage, then delete it from the Desktop
-```
-
-To restore on a new machine: `"$SPARKLE_BIN/generate_keys" -f finetune_sparkle_private_key.txt`
-
-## Cutting a release
-
-Prerequisites: Xcode 27+, `gh` authenticated (`gh auth login`), the Sparkle key in
-your Keychain.
-
-### 1. Bump the version
-
-Edit **both** in `FineTune.xcodeproj` (Target → Build Settings), or in
-`FineTune.xcodeproj/project.pbxproj`:
-
-- `MARKETING_VERSION` → e.g. `1.0.1` (the user-facing version / `CFBundleShortVersionString`)
-- `CURRENT_PROJECT_VERSION` → bump by 1, e.g. `2` (the build number / Sparkle's
-  `sparkle:version`, which is what Sparkle actually compares)
-
-Commit and push the bump.
-
-### 2. Build Release + package the zip
+Check the public identity with the pinned Sparkle tools (no private export):
 
 ```bash
-DD="$HOME/Library/Developer/Xcode/DerivedData/FineTune-Release"
-# Clock-skew guard: remove the product + intermediates so xcodebuild can't skip.
-rm -rf "$DD/Build/Products/Release/FineTune.app" \
-       "$DD/Build/Intermediates.noindex/FineTune.build/Release"
-
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild build \
-  -project FineTune.xcodeproj -scheme FineTune -configuration Release \
-  -derivedDataPath "$DD" -destination 'platform=macOS,arch=arm64' \
-  ENABLE_HARDENED_RUNTIME=NO          # required: ad-hoc + Sparkle.framework
-
-APP="$DD/Build/Products/Release/FineTune.app"
-ZIP="$DD/Build/Products/Release/FineTune.zip"
-rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
+SPARKLE_BIN="/path/to/SourcePackages/artifacts/sparkle/Sparkle/bin"
+"$SPARKLE_BIN/generate_keys" --account FineTune-gudelgado1-v2 -p
 ```
 
-> `ENABLE_HARDENED_RUNTIME=NO` is mandatory — the hardened runtime rejects the
-> separately ad-hoc-signed `Sparkle.framework` and the app SIGKILLs at launch.
-> `scripts/build-dmg.sh` assumes a Developer ID + notarization we don't have; don't
-> use it for ad-hoc releases.
+## Prepare a candidate
 
-### 3. Sign the zip
+Use Xcode 27+ and the pinned package resolution. Increment
+`CURRENT_PROJECT_VERSION` for each release; the v2 base uses build **4**, marketing
+version **1.0.2**. Sparkle compares build numbers, not marketing versions. Keep
+preview build numbers below the next stable build and disable updates in QA.
+
+Build Release with the repository’s existing local ad hoc signing settings, then
+verify the copied app with `codesign --verify --deep --strict`. The current local
+candidate is ad hoc signed and not notarized. Do not claim Developer ID signing
+or notarization from an Ed25519 archive signature.
+
+Package the exact app as `FineTune.app` at the archive root, preserving symlinks:
 
 ```bash
-SPARKLE_BIN="$(find ~/Library/Developer/Xcode/DerivedData -path '*/artifacts/sparkle/Sparkle/bin' -type d | head -1)"
-"$SPARKLE_BIN/sign_update" "$ZIP"
-# → prints:  sparkle:edSignature="…" length="…"
+APP="/path/to/Release/FineTune.app"
+ZIP="/path/to/candidate/FineTune.zip"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+"$SPARKLE_BIN/sign_update" --account FineTune-gudelgado1-v2 "$ZIP"
 ```
 
-Copy the `edSignature` and `length`.
-
-### 4. Create the GitHub Release
+Record the printed public `sparkle:edSignature` and `length`. Independently verify
+against the Info.plist from the app in that exact archive:
 
 ```bash
-VERSION=1.0.1   # match step 1
-gh release create "v$VERSION" "$ZIP#FineTune.zip" \
-  --repo gudelgado1/FineTune-LiquidGlass-Version \
-  --title "FineTune (Liquid Glass) $VERSION" \
-  --notes "…release notes…"
+swift scripts/verify-update-signature.swift "$ZIP" "$APP/Contents/Info.plist" "BASE64_SIGNATURE"
 ```
 
-The asset URL becomes:
-`https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/download/v$VERSION/FineTune.zip`
+Verify archive integrity, app signature, build number, architecture and embedded
+public key. Confirm that the previous public key and a modified archive both fail
+verification. Test the update in isolated QA copies before publishing.
 
-### 5. Add the entry to `appcast.xml` and push
+## Publish after review
 
-Add a new `<item>` at the top of `<channel>` (newest first), using the signature,
-length, and URL from above:
+Publishing the stable release/feed and merging the PR are separate review steps.
+Upload the verified archive as a GitHub Release asset. Only after the asset exists,
+add an item to `appcast-v2.xml` with its HTTPS URL, exact byte length, signature,
+`<sparkle:version>4</sparkle:version>`, short version `1.0.2` and the built app’s
+minimum macOS version. Do not add the new archive to the legacy feed.
 
-```xml
-<item>
-    <title>1.0.1</title>
-    <sparkle:version>2</sparkle:version>                 <!-- = CURRENT_PROJECT_VERSION -->
-    <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
-    <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
-    <pubDate>Thu, 04 Jun 2026 14:47:27 +0000</pubDate>  <!-- date -u "+%a, %d %b %Y %H:%M:%S +0000" -->
-    <enclosure url="https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/download/v1.0.1/FineTune.zip"
-               sparkle:edSignature="…"
-               length="…"
-               type="application/octet-stream"/>
-</item>
-```
-
-```bash
-git add appcast.xml && git commit -m "Publish v1.0.1 to the appcast" && git push origin main
-```
-
-## Verify
-
-```bash
-# Appcast is live on the feed and lists the new version:
-curl -fsSL https://raw.githubusercontent.com/gudelgado1/FineTune-LiquidGlass-Version/main/appcast.xml | grep -E "shortVersionString|enclosure"
-
-# Release asset downloads (302 → 200, content-length == length in the appcast):
-curl -sIL https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/download/v1.0.1/FineTune.zip | grep -iE "^HTTP|content-length"
-```
-
-Then, from an **older** installed build, **Settings → Updates → Check for Updates**
-should offer the new version and install it.
-
-## Notes
-
-- The `sparkle:version` (build number) is what Sparkle compares — always bump
-  `CURRENT_PROJECT_VERSION`, even for tiny releases.
-- Keep `appcast.xml` items newest-first; you may keep older items for history.
-- Re-deploying changes the app's cdhash, which can drop the **Accessibility** grant
-  (media keys). Re-grant in System Settings → Privacy & Security → Accessibility.
+Follow [Sparkle’s publication guide](https://sparkle-project.org/documentation/publishing/).
+An independent signature check does not certify end-to-end installation. Validate
+the live feed and an actual v2-to-v2 update after publishing an appropriate QA
+release. Replacing the executable can require re-granting Accessibility for media
+keys; ordinary user audio settings retain the same storage locations.

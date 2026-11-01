@@ -20,8 +20,8 @@
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/gudelgado1/FineTune-LiquidGlass-Version/main/appcast.xml</string>
+	<string>https://raw.githubusercontent.com/gudelgado1/FineTune-LiquidGlass-Version/main/appcast-v2.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>0EhgtQvpW/aizEs/Ii1LLTinU6jMY0/AkcPuRL6mFzQ=</string>
+	<string>bbJTWltSeENt5vhQ8dWrgJgtLuqEaKc6a17mWUdW/8I=</string>
 </dict>
 </plist>
