@@ -12,6 +12,7 @@ import Testing
         let coordinator = DeviceDirectionControl.Coordinator(selection: .constant(input))
         let control = DeviceDirectionControl.makeControl(coordinator: coordinator)
         #expect(control.window == nil)
+        #expect(control.controlSize == .regular)
         #expect(control.borderShape == .capsule)
         #expect(control.role == .tabs)
         #expect(control.trackingMode == .selectOne)

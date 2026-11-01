@@ -26,7 +26,7 @@ struct DeviceDirectionControl: NSViewRepresentable {
         control.trackingMode = .selectOne
         control.role = .tabs
         control.borderShape = .capsule
-        control.controlSize = .large
+        control.controlSize = .regular
         control.segmentDistribution = .fillEqually
         control.target = coordinator
         control.action = #selector(Coordinator.selectDirection(_:))
@@ -52,7 +52,7 @@ struct DeviceDirectionControl: NSViewRepresentable {
             // Keep native artwork untouched on unrelated parent updates, including
             // updates arriving while the user is tracking a segment.
             if renderedInput != input || control.image(forSegment: 0) == nil {
-                let configuration = NSImage.SymbolConfiguration(textStyle: .body, scale: .large)
+                let configuration = NSImage.SymbolConfiguration(textStyle: .body, scale: .medium)
                     .applying(.preferringMonochrome())
                 let symbols = [
                     (input ? "speaker.wave.2" : "speaker.wave.2.fill", "Output Devices"),
