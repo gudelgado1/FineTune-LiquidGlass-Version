@@ -77,6 +77,12 @@ extension View {
         modifier(MenuTriggerBackgroundModifier(isHovered: isHovered))
     }
 
+    /// Surface for dropdown panels floating above the popup. macOS 26+ uses Liquid
+    /// Glass, which belongs to this separate layer; 14/15 keep the menu material.
+    func floatingMenuSurface(cornerRadius: CGFloat) -> some View {
+        modifier(FloatingMenuSurfaceModifier(cornerRadius: cornerRadius))
+    }
+
     /// Liquid Glass panel background for free-floating surfaces like the on-screen
     /// volume HUD. macOS 26 uses native `.glassEffect(in: .rect(cornerRadius:))`
     /// — the system supplies blur, refraction, edge highlight, and accessibility
@@ -162,6 +168,29 @@ struct MenuTriggerBackgroundModifier: ViewModifier {
                         isHovered ? DesignTokens.Colors.glassRowBorderHover : DesignTokens.Colors.glassRowBorder,
                         lineWidth: 0.5
                     )
+                }
+        }
+    }
+}
+
+// MARK: - Floating Menu Surface
+
+/// See `View.floatingMenuSurface(cornerRadius:)`.
+struct FloatingMenuSurfaceModifier: ViewModifier {
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+        } else {
+            content
+                .background(
+                    VisualEffectBackground(material: .menu, blendingMode: .behindWindow)
+                        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .strokeBorder(DesignTokens.Colors.glassBorder, lineWidth: 0.5)
                 }
         }
     }

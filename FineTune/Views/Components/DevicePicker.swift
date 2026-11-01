@@ -314,14 +314,7 @@ struct DevicePicker: View {
             .frame(maxHeight: 220)
         }
         .frame(width: popoverWidth)
-        .background(
-            VisualEffectBackground(material: .menu, blendingMode: .behindWindow)
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .strokeBorder(DesignTokens.Colors.glassBorder, lineWidth: 0.5)
-        }
+        .floatingMenuSurface(cornerRadius: cornerRadius)
     }
 
     // MARK: - Device Row
