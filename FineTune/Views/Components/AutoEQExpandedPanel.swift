@@ -32,7 +32,6 @@ struct AutoEQExpandedPanel: View {
     let onToggleFavorite: (String) -> Void
 
     @State private var isBrowsing = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - Resolved profile (for graph + name)
 
@@ -79,7 +78,7 @@ struct AutoEQExpandedPanel: View {
                     onToggleFavorite: onToggleFavorite,
                     importErrorMessage: importErrorMessage
                 )
-                .transition(.opacity)
+                .transition(.identity)
             } else {
                 AutoEQCurveView(
                     profile: resolvedProfile,
@@ -99,7 +98,9 @@ struct AutoEQExpandedPanel: View {
         .padding(.horizontal, DesignTokens.Spacing.sm)
         .padding(.top, 6)
         .padding(.bottom, 10)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: isBrowsing)
+        // A cross-fade retains the outgoing white curve behind the native search
+        // field. Replace the content atomically; the popup owns its size animation.
+        .animation(nil, value: isBrowsing)
     }
 
     // MARK: - Profile Info Row

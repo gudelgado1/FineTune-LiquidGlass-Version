@@ -101,3 +101,40 @@ verified before this material fix; do not label that run as testing this fix.
 The compositor regression is covered by the local owned-lab capture loop, not a
 unit test pretending to verify GPU output. Preview 12 physical acceptance remains
 pending. Release publication was explicitly deferred by the user.
+
+## Preview 12 transient flash — 2026-11-02
+
+The user rejected Preview 12 visual acceptance and clarified that the defect
+happens only during the transition: the search field flashes white and then
+returns to its normal color. A new user recording showed the outgoing white
+curve and old controls underneath the incoming browser. In a verified empty
+patch of the field (100×12 pixels), the replay loop measured a peak grayscale
+value of 227.198 versus a settled 100.273, an overshoot of 126.925/255. The chosen
+35/255 bound rejects this particular trace; it is not a platform-wide contrast
+standard. User footage stays local and is excluded from published evidence.
+
+Continuous ScreenCaptureKit recording with an application include-filter kept
+the owned synthetic lab/probe visible through resize. The previous static window
+filter had lost the probe. A sampled local replay now detects the new browser
+header and the old blue curve simultaneously in four 60 fps frames. The ROIs
+exclude search focus-ring pixels and result stars. Curve-only and settled-browser
+negative controls detect zero overlap. This is the meaningful failure loop for
+the fade, rather than a before/after still-image comparison.
+
+The candidate changes the browser transition to `.identity` and clears the
+SwiftUI animation transaction specifically when `isBrowsing` changes. The
+outgoing curve is retired in the same content swap that inserts the native search
+field; the popup retains responsibility for resizing its window. Search, clear,
+favorites, profile application and Escape ownership use the same callbacks.
+The unused Reduce Motion field in the expanded panel was removed; search-result
+scrolling still follows that preference. The independent AppKit resize policy is
+outside this change’s accessibility certification.
+
+Local targeted run `20261102-003332-149296`: six browser/editor/offline tests passed.
+These tests verify functional behavior and compilation, not the visual flash.
+The identity-swap experiment did not obtain an accepted post-change compositor
+recording. The user objected to the visible lab covering their screen, so it was
+closed and no further visible overlay will be opened for this investigation.
+Post-change visual acceptance must come from the manual Preview 13 retest; no
+claim of full visual approval is made from the unit tests or previous green CI.
+No release/feed publication is authorized.
