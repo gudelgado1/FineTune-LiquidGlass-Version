@@ -12,6 +12,9 @@ import Testing
         let popup = FluidMenuBarExtraWindow(title: title) { Text("Popup QA").padding(20) }
         let item = FluidMenuBarExtraStatusItem(title: title, image: .systemNamed("speaker.fill"), window: popup)
         defer { item.dismissWindow(animated: false) }
+        // Other async suites may take key focus. This test owns only fade
+        // completion/reopening; first-click tests below cover delegate routing.
+        popup.delegate = nil
         item.showWindow()
         try await Task.sleep(for: .milliseconds(duringDismissal ? 250 : 60))
         item.dismissWindow()
