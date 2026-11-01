@@ -79,15 +79,6 @@ final class AutoEQProfileManager {
         return profile
     }
 
-    /// Delete an imported profile from disk and catalog.
-    func deleteImportedProfile(id: String) {
-        guard let profile = profiles[id], profile.source == .imported else { return }
-        profiles.removeValue(forKey: id)
-        loader.deleteProfileFiles(id: id)
-        rebuildSearchIndex()
-        logger.info("Deleted imported profile: \(profile.name)")
-    }
-
     // MARK: - Profile Resolution
 
     /// Resolve a profile by ID: memory → cache → network.

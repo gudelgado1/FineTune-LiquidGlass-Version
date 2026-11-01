@@ -89,9 +89,6 @@ enum DesignTokens {
         /// Slider filled track - uses accent color
         static let sliderFill: Color = .accentColor
 
-        /// Slider thumb
-        static let sliderThumb: Color = .white
-
         /// Unity marker on slider
         static let unityMarker: Color = .primary.opacity(0.5)
 
@@ -132,9 +129,6 @@ enum DesignTokens {
 
         // MARK: Menu/Picker
 
-        /// Menu button background
-        static let menuBackground: Color = .clear
-
         /// Menu button border. Light bumped for visible edge on glass surface.
         static let menuBorder = dynamicColor(
             name: "menuBorder",
@@ -149,12 +143,6 @@ enum DesignTokens {
             light: NSColor.black.withAlphaComponent(0.32),
             dark: NSColor.white.withAlphaComponent(0.25)
         )
-
-        /// Picker background
-        static let pickerBackground: Color = .primary.opacity(0.08)
-
-        /// Picker hover
-        static let pickerHover: Color = .primary.opacity(0.12)
 
         // MARK: Hover & Glass Surface
 
@@ -315,12 +303,6 @@ enum DesignTokens {
 
         // MARK: HUD
 
-        /// Active dot in Tahoe HUD tick track
-        static let hudDotActive: Color = .primary.opacity(0.85)
-
-        /// Inactive dot in Tahoe HUD tick track
-        static let hudDotInactive: Color = .primary.opacity(0.18)
-
         /// Active tile in Classic HUD segment row
         static let hudTileActive: Color = .primary.opacity(0.7)
 
@@ -366,15 +348,6 @@ enum DesignTokens {
         /// EQ frequency axis labels — kept at 9 pt because the graph is dense.
         static let eqLabel = Font.system(size: 9, weight: .medium, design: .monospaced)
 
-        /// AutoEQ profile card name.
-        static let cardProfileName = Font.system(.callout, weight: .semibold)
-
-        /// AutoEQ card sub-label (source / measuredBy).
-        static let cardSource = Font.caption
-
-        /// Settings section / card header.
-        static let cardHeader = Font.headline           // 13 pt semibold
-
         /// Settings row helper description.
         static let rowDescription = Font.footnote       // 10 pt
     }
@@ -400,8 +373,6 @@ enum DesignTokens {
         /// 20pt - Extra large
         static let xl: CGFloat = 20
 
-        /// 24pt - Extra extra large
-        static let xxl: CGFloat = 24
     }
 
     // MARK: - Dimensions
@@ -415,15 +386,7 @@ enum DesignTokens {
         /// Content padding
         static var contentPadding: CGFloat { Spacing.lg }
 
-        /// Available content width after padding
-        static var contentWidth: CGFloat {
-            popupWidth - (contentPadding * 2)
-        }
-
         // MARK: Fixed Dimensions
-
-        /// Max height for scrollable content
-        static let maxScrollHeight: CGFloat = 400
 
         // MARK: Corner Radii (rounded style - 10pt)
 
@@ -442,16 +405,10 @@ enum DesignTokens {
         /// App/device icon size
         static let iconSize: CGFloat = 22
 
-        /// Small icon size
-        static let iconSizeSmall: CGFloat = 14
-
         // MARK: Slider Dimensions (minimal style)
 
         /// Slider track height
         static let sliderTrackHeight: CGFloat = 3
-
-        /// Slider thumb width (pill shape)
-        static let sliderThumbWidth: CGFloat = 16
 
         /// Slider thumb height (pill shape)
         static let sliderThumbHeight: CGFloat = 10
@@ -470,9 +427,6 @@ enum DesignTokens {
         /// Slider width
         static let sliderWidth: CGFloat = 140
 
-        /// Minimum slider width
-        static let sliderMinWidth: CGFloat = 120
-
         /// Percentage text width (fixed to prevent layout shift)
         static let percentageWidth: CGFloat = 40
 
@@ -486,14 +440,8 @@ enum DesignTokens {
         /// Settings row icon column width
         static let settingsIconWidth: CGFloat = 24
 
-        /// Settings slider width
-        static let settingsSliderWidth: CGFloat = 200
-
         /// Settings percentage text width
         static let settingsPercentageWidth: CGFloat = 44
-
-        /// Settings picker width
-        static let settingsPickerWidth: CGFloat = 120
 
     }
 

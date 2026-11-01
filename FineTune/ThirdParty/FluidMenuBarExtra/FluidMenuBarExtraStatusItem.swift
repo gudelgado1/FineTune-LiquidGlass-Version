@@ -129,9 +129,6 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
         if let button = self.statusItem.button,
            event.window == button.window
         {
-            #if DEBUG
-            HUDMaterialLab.trace("fluid.local status hud=\(hudAnchor?.isHUDVisible == true)")
-            #endif
             // Command-drag remains owned by the menu bar.
             if event.type == .leftMouseDown && event.modifierFlags.contains(.command) { return event }
             let contextClick = event.type == .rightMouseDown || event.modifierFlags.contains(.control)

@@ -35,20 +35,7 @@ struct HUDGlassSurface: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        #if DEBUG
-        let lab = ProcessInfo.processInfo.arguments.contains("--hud-material-lab")
-        if lab && ProcessInfo.processInfo.arguments.contains("--hud-material-opaque-control") {
-            content.background(.black, in: shape)
-        } else if lab && ProcessInfo.processInfo.arguments.contains("--hud-material-legacy-control") {
-            if #available(macOS 26.0, *) {
-                content.background(.black.opacity(0.55), in: shape).glassEffect(.regular, in: shape)
-            } else { content.background(.black.opacity(0.55), in: shape) }
-        } else {
-            surface(content, shape: shape)
-        }
-        #else
         surface(content, shape: shape)
-        #endif
     }
 
     @ViewBuilder private func surface(_ content: Content, shape: RoundedRectangle) -> some View {

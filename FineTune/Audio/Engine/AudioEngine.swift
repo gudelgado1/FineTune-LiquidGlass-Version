@@ -651,11 +651,6 @@ final class AudioEngine {
 
     // MARK: - Per-Device AutoEQ
 
-    func getAutoEQProfile(for deviceUID: String) -> AutoEQProfile? {
-        guard let selection = settingsManager.getAutoEQSelection(for: deviceUID) else { return nil }
-        return autoEQProfileManager.profile(for: selection.profileID)
-    }
-
     func setAutoEQProfile(for deviceUID: String, profileID: String?) {
         if let profileID {
             settingsManager.setAutoEQSelection(for: deviceUID, to: AutoEQSelection(profileID: profileID, isEnabled: true))

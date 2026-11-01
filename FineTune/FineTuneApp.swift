@@ -164,11 +164,6 @@ struct FineTuneApp: App {
     }
 
     init() {
-        #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--hud-material-lab") {
-            HUDMaterialLab.run()
-        }
-        #endif
         // Install crash handler to clean up aggregate devices on abnormal exit
         CrashGuard.install()
         // Destroy any orphaned aggregate devices from previous crashes

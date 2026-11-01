@@ -689,9 +689,6 @@ final class HUDWindowController {
     }
 
     func handleGlobalMouseDown(_ event: NSEvent) {
-        #if DEBUG
-        HUDMaterialLab.trace("hud.global hud=\(menuBarAnchor.canPromoteHUD)")
-        #endif
         guard isSystemCapsule, panel?.isVisible == true else { dismiss(); return }
         if event.type == .leftMouseDown,
            event.modifierFlags.intersection([.command, .control]).isEmpty,
@@ -705,9 +702,6 @@ final class HUDWindowController {
 
     @discardableResult
     func handleOutsideMouseDown(_ event: NSEvent) -> NSEvent {
-        #if DEBUG
-        HUDMaterialLab.trace("hud.local status=\(menuBarAnchor.ownsStatusItemEvent(event)) hud=\(menuBarAnchor.isHUDVisible)")
-        #endif
         // The item's own monitor must see the still-visible HUD so it can
         // promote it to the popup. Monitor invocation order is not guaranteed.
         if isSystemCapsule && menuBarAnchor.ownsStatusItemEvent(event) { return event }

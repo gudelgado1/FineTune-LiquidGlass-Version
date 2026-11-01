@@ -163,12 +163,6 @@ final class AutoEQFetcher {
 
     // MARK: - Cache Management
 
-    /// Check if a profile is already cached locally.
-    func hasCachedProfile(id: String) -> Bool {
-        let file = fetchedProfilesDirectory.appendingPathComponent("\(id).txt")
-        return FileManager.default.fileExists(atPath: file.path)
-    }
-
     // MARK: - INDEX.md Parsing
 
     /// Parse INDEX.md markdown into catalog entries with deduplication.

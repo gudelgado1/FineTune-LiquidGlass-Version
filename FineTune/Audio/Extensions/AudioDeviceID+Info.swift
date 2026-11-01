@@ -26,9 +26,6 @@ extension AudioDeviceID {
 // MARK: - Tap Properties
 
 extension AudioObjectID {
-    nonisolated func readAudioTapStreamBasicDescription() throws -> AudioStreamBasicDescription {
-        try read(kAudioTapPropertyFormat, defaultValue: AudioStreamBasicDescription())
-    }
 }
 
 // MARK: - Process Properties

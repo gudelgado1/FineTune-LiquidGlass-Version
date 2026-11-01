@@ -112,9 +112,6 @@ extension HUDMenuBarAnchor: NSStatusItemExpandedInterfaceDelegate {
                   ObjectIdentifier(ownItem) == itemID,
                   self.nativeDriver.currentSessionID == sessionID else { return }
             self.sessions.nativeSessionBegan(sessionID)
-            #if DEBUG
-            HUDMaterialLab.trace("anchor.begin hud=\(self.isHUDVisible) popup=\(self.isPopupVisible)")
-            #endif
         }
     }
 
@@ -123,9 +120,6 @@ extension HUDMenuBarAnchor: NSStatusItemExpandedInterfaceDelegate {
         Task { @MainActor [weak self] in
             guard let self, let ownItem = self.statusItem,
                   ObjectIdentifier(ownItem) == itemID else { return }
-            #if DEBUG
-            HUDMaterialLab.trace("anchor.end hud=\(self.isHUDVisible) popup=\(self.isPopupVisible)")
-            #endif
             self.sessions.nativeSessionEnded(animated: animated)
         }
     }

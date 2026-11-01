@@ -19,7 +19,6 @@ struct DesignTokensSpacingTests {
         #expect(DesignTokens.Spacing.md > 0)
         #expect(DesignTokens.Spacing.lg > 0)
         #expect(DesignTokens.Spacing.xl > 0)
-        #expect(DesignTokens.Spacing.xxl > 0)
     }
 
     @Test("Spacing scale is strictly increasing")
@@ -31,7 +30,6 @@ struct DesignTokensSpacingTests {
             DesignTokens.Spacing.md,
             DesignTokens.Spacing.lg,
             DesignTokens.Spacing.xl,
-            DesignTokens.Spacing.xxl,
         ]
         for i in 1..<scale.count {
             #expect(scale[i] > scale[i - 1],
@@ -47,7 +45,6 @@ struct DesignTokensSpacingTests {
         #expect(DesignTokens.Spacing.md == 12)
         #expect(DesignTokens.Spacing.lg == 16)
         #expect(DesignTokens.Spacing.xl == 20)
-        #expect(DesignTokens.Spacing.xxl == 24)
     }
 }
 
@@ -62,12 +59,6 @@ struct DesignTokensDimensionTests {
         #expect(DesignTokens.Dimensions.popupWidth < 1000)
     }
 
-    @Test("contentWidth is popupWidth minus double padding")
-    func contentWidthFormula() {
-        let expected = DesignTokens.Dimensions.popupWidth - (DesignTokens.Dimensions.contentPadding * 2)
-        #expect(DesignTokens.Dimensions.contentWidth == expected)
-    }
-
     @Test("Corner radii are positive")
     func cornerRadiiPositive() {
         #expect(DesignTokens.Dimensions.cornerRadius > 0)
@@ -78,7 +69,6 @@ struct DesignTokensDimensionTests {
     @Test("Slider dimensions are positive")
     func sliderDimensionsPositive() {
         #expect(DesignTokens.Dimensions.sliderTrackHeight > 0)
-        #expect(DesignTokens.Dimensions.sliderThumbWidth > 0)
         #expect(DesignTokens.Dimensions.sliderThumbHeight > 0)
         #expect(DesignTokens.Dimensions.sliderThumbSize > 0)
     }
@@ -86,8 +76,6 @@ struct DesignTokensDimensionTests {
     @Test("Icon sizes are positive")
     func iconSizes() {
         #expect(DesignTokens.Dimensions.iconSize > 0)
-        #expect(DesignTokens.Dimensions.iconSizeSmall > 0)
-        #expect(DesignTokens.Dimensions.iconSizeSmall < DesignTokens.Dimensions.iconSize)
     }
 
     @Test("VU meter has 8 bars")
