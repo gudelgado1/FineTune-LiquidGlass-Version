@@ -7,6 +7,22 @@ subtle outline, divider and native press feedback. That reference is visual;
 it is not evidence of Finder's internal implementation. No UI was launched,
 no unrelated application inspected, and no app code changed for this research.
 
+## Latest implementation decision after Preview 18 feedback
+
+The user approved Preview 18's interaction effect but rejected its rectangular
+appearance. The current candidate owns an NSSegmentedControl and explicitly sets
+`role = .tabs`, `borderShape = .capsule`, and `trackingMode = .selectOne`.
+SwiftUI supplies the existing boolean binding; a small coordinator forwards native
+actions and reconciles external state updates. Native font-based symbol sizing,
+image accessibility descriptions and individual tooltips are preserved. There
+is no subclassed drawing, private hierarchy mutation, custom glass overlay,
+manual tint, shadow or replacement press animation. Older systems retain the
+existing compatible SwiftUI segmented picker.
+
+The earlier `.tabs`-only recommendation below describes the Preview 18 checkpoint.
+It solved semantics/interaction but did not request capsule geometry explicitly.
+Public borderShape/role references and limits appear in the final section.
+
 ## Adoption guide and constrained recommendation
 
 The user explicitly referenced Apple's **Adopting Liquid Glass → Controls**
@@ -195,3 +211,109 @@ selection; intrinsic header-plus-padding size was 89×48 pt. Every panel remaine
 unordered. This checks structure and state, not appearance, press feedback,
 VoiceOver speech or light/dark compositor rendering. The new macOS 27 candidate
 remains subject to manual visual acceptance.
+
+
+## Preview 18 follow-up: preserve native tabs, request capsule geometry
+
+The user accepted the `.tabs` interaction effect but rejected the remaining
+rounded-rectangle appearance. That is the latest product evidence; the initial
+native-tabs recommendation above is no longer a complete visual solution.
+No new preview or app-source change was made for this follow-up research.
+
+**A public native shape seam exists in AppKit.** The SDK 27.2 public headers
+expose `NSSegmentedControl.borderShape` (macOS 26+) and
+`NSSegmentedControl.role` (macOS 27+) independently. The former accepts
+`NSControl.BorderShape.capsule`; the latter accepts `.tabs`, `.valueSelection`
+or `.automatic`. An owned `NSSegmentedControl` configured with `.selectOne`
+tracking, `.tabs` role and `.capsule` border shape is therefore a supported
+candidate that can request capsule geometry while keeping native selection
+and press handling. Use default/automatic segment style and native sizing first.
+This avoids finding or modifying SwiftUI's private backing-view hierarchy.
+It does **not** guarantee the inner highlight's exact corner curvature, glass
+optics, Finder identity or preservation of every timing detail seen in Preview 18.
+[borderShape](https://developer.apple.com/documentation/appkit/nssegmentedcontrol/bordershape),
+[NSControl.BorderShape](https://developer.apple.com/documentation/appkit/nscontrol/bordershape),
+[role](https://developer.apple.com/documentation/appkit/nssegmentedcontrol/role-swift.property),
+[Role](https://developer.apple.com/documentation/appkit/nssegmentedcontrol/role-swift.enum).
+
+Do not confuse the newer `borderShape = .capsule` with the legacy
+`NSSegmentedControl.Style.capsule`: that style dates to macOS 10.5, and the SDK
+header says capsule/texturedRounded share artwork on macOS 10.10 and later.
+No `.glass` segment-style case exists in the public SDK 27.2 header. Automatic
+style explicitly depends on the window type and control placement. The native
+candidate should be assessed in FineTune's actual panel context.
+[Style](https://developer.apple.com/documentation/appkit/nssegmentedcontrol/style),
+[segmentStyle](https://developer.apple.com/documentation/appkit/nssegmentedcontrol/segmentstyle).
+
+**SwiftUI shape/size tweaks are not documented equivalents.**
+`buttonBorderShape(.capsule)` documents the platter of bordered and prominent
+buttons; it does not promise to reshape a Picker. `ControlSize.large` is a size
+class, not a material or shape selector. The current `.extraLarge` documentation
+says it resolves to `.large` outside visionOS. Neither is evidence that a tiny
+rounded segmented Picker becomes the requested glass capsule.
+[buttonBorderShape](https://developer.apple.com/documentation/swiftui/view/buttonbordershape(_:)),
+[ControlSize](https://developer.apple.com/documentation/swiftui/controlsize),
+[extraLarge](https://developer.apple.com/documentation/swiftui/controlsize/extralarge).
+
+The adoption guide is cross-platform and lists SwiftUI, UIKit and AppKit controls;
+its For You/Library video is an illustrative design reference, not a contract that
+one macOS style, window context and size matches that clip. Do not label the clip
+as a measured macOS 27/Finder reference without additional evidence.
+[Adopting Liquid Glass — Controls](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass#Controls).
+
+If using an owned AppKit bridge, maintain target/action-to-binding synchronization,
+selected index on external updates, image accessibility descriptions, per-segment
+tooltips and keyboard semantics. The native image initializer's public header
+explicitly requires accessibility descriptions for its images. Guard role on
+macOS 27 and borderShape on macOS 26, retaining older supported behavior.
+No global appearance changes, clipping masks or second glass overlay are needed.
+[NSSegmentedControl](https://developer.apple.com/documentation/appkit/nssegmentedcontrol).
+
+If the supported shape request still cannot produce the accepted visual outcome,
+a custom glass control is an explicit design tradeoff: it can use public glass
+interaction APIs, but retaining the exact accepted native tab effect cannot be
+promised. A non-visible structural check alone is insufficient to approve the
+new look. Preserve the existing accepted Other Outputs behavior and require a
+bounded manual appearance verdict rather than another unverified visual claim.
+
+
+## User-provided motion files and official Sketch kit
+
+The two supplied Apple adoption-guide MP4s are 1080×334 / 33.366667 s (segmented)
+and 1080×318 / 43.033333 s (slider), both 30 fps. Frames extracted only from
+these supplied files show a subdued shared track, a capsule selection that
+expands/deforms during interaction, and a slider thumb that grows/translucently
+reveals the track while dragging and settles on release. These are observations
+of the provided guide clips, not measured FineTune behavior or a platform identity
+claim. The videos/contact sheets are kept outside Git and public evidence bundles.
+
+The user-linked Sketch document is titled **Apple macOS 27 UI Kit** and its
+same share ID is linked from Apple's macOS 27 Design Resources section. Public
+browser inspection found separate Content Area/Over-glass, Light/Dark and
+active/inactive variants. The inspected Light/Over-glass/Duo regular frame is
+60×24 with radius 6. Its capsule-like treatment is not a universal requirement
+for every size/context: native borderShape is the explicit product choice for
+the desired capsule. Do not copy the Sketch preview's flat CSS gradients as a
+replacement for dynamic native material.
+[Official resources](https://developer.apple.com/design/resources/),
+[Inspected regular frame](https://www.sketch.com/s/57153a31-3379-4737-8ac6-dbfd6525f052/f/6533AE04-CE96-4CD0-8DBB-D1C4DD7384C7#Inspector).
+
+The kit's slider listings include Idle, Clicked and Disabled states and size
+classes with heights 16/20/24/28/36. FineTune's current LiquidGlassSlider already
+wraps native Slider, but uses `.mini` and a fixed 10 pt outer height. This is a
+follow-up geometry/hit-area concern to inspect against the reference, not proof
+of clipping or a reason to replace the native slider with a drawn simulation.
+The current capsule candidate does not change slider code.
+[Slider reference listing](https://www.sketch.com/s/57153a31-3379-4737-8ac6-dbfd6525f052/symbols?g=Sliders).
+
+## Capsule candidate validation
+
+Run 20261102-033207-604306 passed 15 targeted test methods, including three new
+native control tests (one with two selected-direction cases). They exercise
+native capsule/tab configuration, nonempty named images, target/action writes,
+refreshing the coordinator binding, outside selection changes, avoiding image
+churn on unrelated updates and invalid deselection. The controls have no window;
+no visible UI was launched. Optimized arm64 Release passed. These checks do not
+certify the selected pill's compositor rendering, press animation, keyboard focus
+with the popup root, VoiceOver speech or visual identity with the guide/Finder.
+Manual Preview 19 acceptance remains required.

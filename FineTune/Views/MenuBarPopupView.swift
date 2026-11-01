@@ -510,13 +510,13 @@ struct MenuBarPopupView: View {
 
     // MARK: - Device Direction
 
-    /// macOS 27 distinguishes tab navigation from value selection. Use its
-    /// native tab treatment rather than drawing another glass layer over the
-    /// generic segmented picker. Earlier systems keep the compatible style.
+    /// Configure the native tab role and capsule shape together. The control
+    /// retains system selection/press artwork without an extra glass layer.
     @ViewBuilder
     private var deviceTabsHeader: some View {
         if #available(macOS 27.0, *) {
-            deviceDirectionPicker.pickerStyle(.tabs)
+            DeviceDirectionControl(showingInput: $showingInputDevices.animation(DesignTokens.Animation.disclosure))
+                .fixedSize()
         } else {
             deviceDirectionPicker.pickerStyle(.segmented)
         }
