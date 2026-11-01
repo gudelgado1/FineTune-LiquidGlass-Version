@@ -126,6 +126,7 @@ extension MenuBarPopupView {
             } else {
                 ForEach(visibleOutputDevices) { device in
                     outputDeviceRow(device)
+                        .transition(.opacity)
                 }
             }
         }
@@ -202,12 +203,17 @@ extension MenuBarPopupView {
     }
 
     func setShowingOtherOutputs(_ show: Bool) {
-        if !show, let expandedRowID,
-           outputLayout.alternatives.contains(where: { $0.uid == expandedRowID }) {
-            inlineEditor.dismissCurrent()
-            self.expandedRowID = nil
+        // Animate the disclosure itself, not just its chevron. Keep navigation
+        // synchronous so removed rows cannot retain keyboard selection during
+        // the visual collapse. The shared token also honors Reduce Motion.
+        withAnimation(DesignTokens.Animation.disclosure) {
+            if !show, let expandedRowID,
+               outputLayout.alternatives.contains(where: { $0.uid == expandedRowID }) {
+                inlineEditor.dismissCurrent()
+                self.expandedRowID = nil
+            }
+            showingOtherOutputs = show
         }
-        showingOtherOutputs = show
         syncNavOrder()
     }
 

@@ -80,8 +80,11 @@ laboratory overlay or automatic preview launch is authorized for this work.
 - Shared hover feedback changes from 0.12 s ease-out to 0.18 s ease-in-out.
   Existing consumers outside the popup receive this small timing change too.
 - Popup disclosures use a 0.30 s `smooth` spring, with no extra bounce. The
-  Other Outputs chevron rotates; panel size still belongs to AppKit rather
-  than a second animated SwiftUI list layout.
+  Other Outputs initially animated only its chevron; the user reported the
+  missing list effect in Preview 15. The follow-up wraps the shared disclosure
+  mutation in the same animation and fades entering/leaving rows. AppKit still
+  owns the outer panel frame. Keyboard order updates synchronously, and click,
+  Shift-Command-O, Escape and route-change collapse use the shared handler.
 - Removed the app EQ's 0.4 s input lock so another click can reverse the action.
 - Reduced Motion skips the panel fades, resizing, disclosure and hover motion;
   expandable rows also remove their scale/opacity transition through the live
@@ -95,3 +98,15 @@ Two native lifecycle cases cover reopening during appearance and dismissal;
 run those on CI, not as visible windows on the user's desktop. Perceived motion,
 rapid disclosure/escape, search flash and Reduce Motion still require a manual
 preview check. No automatic preview launch or release is part of this change.
+
+
+### Other Outputs follow-up validation
+
+Preview 15 feedback: the list lacked the effect even though the chevron moved.
+The handler had no animated transaction. Added it at the existing shared action
+seam and explicit opacity transitions for inserted/removed rows; no global
+animation modifier or separate resize driver was added. This small visual
+change reuses the presentation/navigation tests rather than adding a test that
+only asserts the chosen animation constant. Its perceived smoothness, clipping,
+rapid reversal and expanded AutoEQ teardown need manual Preview 16 acceptance.
+No visible reproduction or compositor capture was run on the user's desktop.
