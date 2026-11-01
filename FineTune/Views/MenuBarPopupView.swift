@@ -404,6 +404,8 @@ struct MenuBarPopupView: View {
             // Keep secondary system sounds available after the main app controls.
             if !showingInputDevices && !isEditingDevicePriority
                 && audioEngine.settingsManager.appSettings.showSoundEffectsRow {
+                SectionHeader(title: "System")
+                    .padding(.top, DesignTokens.Spacing.sm)
                 systemSoundsRow
             }
 

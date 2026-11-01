@@ -160,8 +160,7 @@ struct SystemSoundsRow: View {
                     }
                 )
                 .opacity(isRowHovered || isEditing || isPercentageEditing ? 1 : 0)
-                .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
-                .clipped()
+                .frame(width: DesignTokens.Dimensions.percentageWidth)
                 .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
 
                 Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)

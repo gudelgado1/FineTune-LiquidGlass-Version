@@ -131,8 +131,8 @@ struct InputDeviceRow: View {
             }
             .scrollWheelStep($sliderValue, in: 0.0...1.0)
 
-            // Editable volume percentage — collapses to zero width when hidden,
-            // expands + fades in on row hover/drag/edit. No layout gap at rest.
+            // Editable volume percentage — hidden at rest,
+            // fades in on row hover/drag/edit inside its fixed column.
             EditablePercentage(
                 percentage: Binding(
                     get: { Int(round(sliderValue * 100)) },
@@ -146,8 +146,7 @@ struct InputDeviceRow: View {
                 textEntry: textEntry
             )
             .opacity(isRowHovered || isEditing || isPercentageEditing ? 1 : 0)
-            .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
-            .clipped()
+            .frame(width: DesignTokens.Dimensions.percentageWidth)
             .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
 
             Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)

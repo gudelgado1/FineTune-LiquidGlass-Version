@@ -321,7 +321,7 @@ enum DesignTokens {
     //   .footnote   → 10 pt            .caption  → 10 pt
 
     enum Typography {
-        /// Uppercase section label (e.g. "APPS", "OUTPUT DEVICES").
+        /// Section label (e.g. "Apps", "Output Devices").
         /// subheadline + semibold in sentence case, like native macOS section headers.
         static let sectionHeader = Font.system(.subheadline, weight: .semibold)
 
@@ -429,9 +429,9 @@ enum DesignTokens {
         /// app row's VU meter + spacing + 24pt icon, so row names share a column.
         static let badgeRowLeadingInset: CGFloat = 14
 
-        /// Trailing column reserved by rows without boost and output controls,
-        /// so every volume slider in the popup shares the same start and end.
-        static let rowAccessoryWidth: CGFloat = 60
+        /// Trailing gap left by rows without boost and output controls, after a
+        /// fixed percentage column, so every slider shares the same start and end.
+        static let rowAccessoryWidth: CGFloat = 20
 
         /// Percentage text width (fixed to prevent layout shift)
         static let percentageWidth: CGFloat = 40
