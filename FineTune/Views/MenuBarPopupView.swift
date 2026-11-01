@@ -510,23 +510,29 @@ struct MenuBarPopupView: View {
 
     // MARK: - Device Direction
 
-    /// A single-choice native control owns the selection highlight, hover,
-    /// keyboard focus and appearance. Only the content disclosure is animated
-    /// by FineTune; there is no second custom glass or sliding-background layer.
+    /// macOS 27 distinguishes tab navigation from value selection. Use its
+    /// native tab treatment rather than drawing another glass layer over the
+    /// generic segmented picker. Earlier systems keep the compatible style.
+    @ViewBuilder
     private var deviceTabsHeader: some View {
+        if #available(macOS 27.0, *) {
+            deviceDirectionPicker.pickerStyle(.tabs)
+        } else {
+            deviceDirectionPicker.pickerStyle(.segmented)
+        }
+    }
+
+    private var deviceDirectionPicker: some View {
         Picker("Device Direction", selection: $showingInputDevices.animation(DesignTokens.Animation.disclosure)) {
             Label("Output Devices", systemImage: showingInputDevices ? "speaker.wave.2" : "speaker.wave.2.fill")
                 .tag(false)
             Label("Input Devices", systemImage: showingInputDevices ? "mic.fill" : "mic")
                 .tag(true)
         }
-        .pickerStyle(.segmented)
         .labelsHidden()
         .labelStyle(.iconOnly)
-        .font(.system(size: 14, weight: .regular))
         .imageScale(.medium)
         .symbolRenderingMode(.monochrome)
-        .controlSize(.regular)
         .fixedSize()
         .help("Choose output or input devices")
         .accessibilityIdentifier("devices.direction.picker")
