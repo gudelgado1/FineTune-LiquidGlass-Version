@@ -239,17 +239,7 @@ struct DevicePicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background {
-            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.buttonRadius)
-                .fill(.regularMaterial)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.buttonRadius)
-                .strokeBorder(
-                    isButtonHovered ? DesignTokens.Colors.glassRowBorderHover : DesignTokens.Colors.glassRowBorder,
-                    lineWidth: 0.5
-                )
-        }
+        .menuTriggerBackground(isHovered: isButtonHovered)
         .onHover { isButtonHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isButtonHovered)
     }
@@ -272,6 +262,7 @@ struct DevicePicker: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(triggerText)
         .help(triggerText)
         .onHover { isButtonHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isButtonHovered)
@@ -449,6 +440,8 @@ private struct DevicePickerRow: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityValue(isDefaultDevice ? Text("Default device") : Text(verbatim: ""))
         .whenHovered { isHovered = $0 }
     }
 
@@ -506,7 +499,7 @@ private struct DevicePickerRow: View {
                 if isDisabled {
                     Text("Not available in multi mode")
                         .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(DesignTokens.Colors.textQuaternary)
+                        .foregroundStyle(DesignTokens.Colors.textSecondary)
                 } else {
                     Text("Follows macOS default")
                         .font(DesignTokens.Typography.caption)

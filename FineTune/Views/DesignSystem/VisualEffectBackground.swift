@@ -65,12 +65,16 @@ extension View {
         modifier(LiftedCardBackgroundModifier())
     }
 
-    /// Small Liquid Glass chip background — for capsules, pills, badges,
-    /// floating controls. macOS 26 uses `.glassEffect(.regular, in: shape)`;
-    /// older releases fall back to `.regularMaterial`. Call this instead of
-    /// hand-rolling `.background(.regularMaterial, in: shape)` everywhere.
+    /// Small control background — for capsules, pills and badges on a glass
+    /// surface. See `GlassChipModifier`. Call this instead of hand-rolling
+    /// `.background(.regularMaterial, in: shape)` everywhere.
     func glassChip<S: Shape>(in shape: S = Capsule()) -> some View {
         modifier(GlassChipModifier(shape: AnyShape(shape)))
+    }
+
+    /// Dropdown trigger background. See `MenuTriggerBackgroundModifier`.
+    func menuTriggerBackground(isHovered: Bool) -> some View {
+        modifier(MenuTriggerBackgroundModifier(isHovered: isHovered))
     }
 
     /// Liquid Glass panel background for free-floating surfaces like the on-screen
@@ -118,18 +122,47 @@ struct GlassBackgroundModifier: ViewModifier {
 
 // MARK: - Glass Chip Modifier
 
-/// Small reusable Liquid Glass background for chips/capsules/badges.
-/// Centralizes the previously scattered material fills so every small floating
-/// surface adopts Liquid Glass uniformly on macOS 26 and degrades on 14/15.
-/// Uses the standard `.regular` variant; the caller's `shape` is kept.
+/// Background for small controls that sit on the popup or settings glass.
+/// Liquid Glass must not stack on Liquid Glass, so macOS 26+ uses a system fill
+/// over the parent surface; 14/15 keep the material the parent there lacks.
 struct GlassChipModifier: ViewModifier {
     let shape: AnyShape
 
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: shape)
+            content.background(.fill.tertiary, in: shape)
         } else {
             content.background(.regularMaterial, in: shape)
+        }
+    }
+}
+
+// MARK: - Menu Trigger Background
+
+/// Shared background for dropdown triggers. macOS 26+ follows `GlassChipModifier`
+/// with a stronger fill on hover; 14/15 keep the material and hairline.
+struct MenuTriggerBackgroundModifier: ViewModifier {
+    let isHovered: Bool
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: DesignTokens.Dimensions.buttonRadius)
+    }
+
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.background(
+                isHovered ? AnyShapeStyle(.fill.secondary) : AnyShapeStyle(.fill.tertiary),
+                in: shape
+            )
+        } else {
+            content
+                .background { shape.fill(.regularMaterial) }
+                .overlay {
+                    shape.strokeBorder(
+                        isHovered ? DesignTokens.Colors.glassRowBorderHover : DesignTokens.Colors.glassRowBorder,
+                        lineWidth: 0.5
+                    )
+                }
         }
     }
 }
@@ -170,22 +203,20 @@ struct GlassPanelModifier: ViewModifier {
 /// depth cue, not a chromatic surface, and remain readable in both modes
 /// without an appearance-aware token.
 struct LiftedCardBackgroundModifier: ViewModifier {
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: DesignTokens.Dimensions.rowRadius)
+    }
+
     func body(content: Content) -> some View {
-        content
-            .background {
-                RoundedRectangle(cornerRadius: DesignTokens.Dimensions.rowRadius)
-                    .fill(DesignTokens.Colors.eqCardBackground)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: DesignTokens.Dimensions.rowRadius)
-                    .strokeBorder(DesignTokens.Colors.eqCardBorder, lineWidth: 0.5)
-            }
-            .shadow(
-                color: Color.black.opacity(0.06),
-                radius: 1.5,
-                x: 0,
-                y: 0.5
-            )
+        if #available(macOS 26.0, *) {
+            // The parent glass already supplies depth; a system fill groups the content.
+            content.background(.fill.quaternary, in: shape)
+        } else {
+            content
+                .background { shape.fill(DesignTokens.Colors.eqCardBackground) }
+                .overlay { shape.strokeBorder(DesignTokens.Colors.eqCardBorder, lineWidth: 0.5) }
+                .shadow(color: Color.black.opacity(0.06), radius: 1.5, x: 0, y: 0.5)
+        }
     }
 }
 

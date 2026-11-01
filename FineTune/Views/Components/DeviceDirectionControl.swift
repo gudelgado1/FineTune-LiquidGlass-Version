@@ -52,7 +52,7 @@ struct DeviceDirectionControl: NSViewRepresentable {
             // Keep native artwork untouched on unrelated parent updates, including
             // updates arriving while the user is tracking a segment.
             if renderedInput != input || control.image(forSegment: 0) == nil {
-                let configuration = NSImage.SymbolConfiguration(textStyle: .body, scale: .medium)
+                let configuration = NSImage.SymbolConfiguration(textStyle: .body, scale: .large)
                     .applying(.preferringMonochrome())
                 let symbols = [
                     (input ? "speaker.wave.2" : "speaker.wave.2.fill", "Output Devices"),

@@ -240,6 +240,7 @@ private struct SoundEffectsDeviceOption: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .onHover { isHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isHovered)
     }

@@ -2,9 +2,7 @@
 import SwiftUI
 
 /// Native macOS 26 slider with Liquid Glass thumb.
-/// Track colour matches the system volume slider exactly:
-///   • idle:    #0073F8
-///   • dragging: #005ADE
+/// The track follows the system accent color, as the standard slider does.
 struct LiquidGlassSlider: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
@@ -12,11 +10,6 @@ struct LiquidGlassSlider: View {
     let onEditingChanged: ((Bool) -> Void)?
 
     @State private var isEditing = false
-
-    /// Idle track fill — matches macOS 26 system volume slider at rest.
-    private static let tintIdle    = Color(red: 0/255, green: 115/255, blue: 248/255) // #0073F8
-    /// Active track fill — matches macOS 26 system volume slider while dragging.
-    private static let tintActive  = Color(red: 0/255, green:  90/255, blue: 222/255) // #005ADE
 
     init(
         value: Binding<Double>,
@@ -49,7 +42,7 @@ struct LiquidGlassSlider: View {
                 onEditingChanged?(editing)
             }
             .controlSize(.mini)
-            .tint(isEditing ? Self.tintActive : Self.tintIdle)
+            .tint(DesignTokens.Colors.sliderFill)
         }
         .frame(height: DesignTokens.Dimensions.sliderThumbHeight)
     }

@@ -19,8 +19,18 @@ enum DesignTokens {
     /// per-token RGBA values.
     static func dynamicColor(name: String, light: NSColor, dark: NSColor) -> Color {
         Color(nsColor: NSColor(name: NSColor.Name(name)) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            let base = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            // `bestMatch` never returns the high-contrast names, so read the setting.
+            let highContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+            return highContrast ? increasedContrast(base) : base
         })
+    }
+
+    /// Strengthens a translucent token for the system Increase Contrast setting.
+    /// Fully clear tokens stay clear: they mean "no surface", not a faint one.
+    static func increasedContrast(_ color: NSColor) -> NSColor {
+        guard color.alphaComponent > 0 else { return color }
+        return color.withAlphaComponent(min(1, color.alphaComponent * 1.5))
     }
 
     // MARK: - Colors
@@ -55,7 +65,7 @@ enum DesignTokens {
         static let accentPrimary: Color = .accentColor
 
         /// Mute button active (muted state) - red for visibility
-        static let mutedIndicator = Color(nsColor: .systemRed).opacity(0.85)
+        static let mutedIndicator = Color(nsColor: .systemRed)
 
         /// Default device indicator - uses accent color
         static let defaultDevice: Color = .accentColor
@@ -247,22 +257,22 @@ enum DesignTokens {
         static let sectionHeaderText = dynamicColor(
             name: "sectionHeaderText",
             light: NSColor.black.withAlphaComponent(0.65),
-            dark: NSColor.white.withAlphaComponent(0.40)
+            dark: NSColor.white.withAlphaComponent(0.60)
         )
 
         // MARK: VU Meter (Professional audio standard - NOT themed)
 
         /// VU meter green segments (bars 0-3, safe levels)
-        static let vuGreen = Color(red: 0.20, green: 0.78, blue: 0.40)
+        static let vuGreen = Color(nsColor: .systemGreen)
 
         /// VU meter yellow segments (bars 4-5, caution)
-        static let vuYellow = Color(red: 0.95, green: 0.75, blue: 0.20)
+        static let vuYellow = Color(nsColor: .systemYellow)
 
         /// VU meter orange segment (bar 6, warning)
-        static let vuOrange = Color(red: 0.95, green: 0.50, blue: 0.20)
+        static let vuOrange = Color(nsColor: .systemOrange)
 
         /// VU meter red segment (bar 7, peak/clip)
-        static let vuRed = Color(red: 0.90, green: 0.25, blue: 0.25)
+        static let vuRed = Color(nsColor: .systemRed)
 
         /// VU meter unlit bar color (matches sliderTrack for visual consistency)
         static let vuUnlit: Color = .primary.opacity(0.15)
@@ -285,14 +295,14 @@ enum DesignTokens {
         static let autoEQEmptyIcon = dynamicColor(
             name: "autoEQEmptyIcon",
             light: NSColor(white: 0.45, alpha: 1.0),
-            dark: NSColor(white: 0.267, alpha: 1.0)
+            dark: NSColor(white: 0.60, alpha: 1.0)
         )
 
         /// AutoEQ toggle label text color (Correction / Preamp labels).
         static let autoEQToggleLabel = dynamicColor(
             name: "autoEQToggleLabel",
             light: NSColor.black.withAlphaComponent(0.65),
-            dark: NSColor.white.withAlphaComponent(0.5)
+            dark: NSColor.white.withAlphaComponent(0.60)
         )
 
         /// High-emphasis icon foreground on glass controls. Keeps icons visible
@@ -419,6 +429,9 @@ enum DesignTokens {
 
         /// Corner radius for popup
         static let cornerRadius: CGFloat = 12
+
+        /// Popup corner radius, matching the macOS 27 popover
+        static let popupRadius: CGFloat = 20
 
         /// Corner radius for row cards (glass bars)
         static let rowRadius: CGFloat = 10

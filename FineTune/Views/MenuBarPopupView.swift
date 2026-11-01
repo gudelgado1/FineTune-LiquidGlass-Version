@@ -150,9 +150,7 @@ struct MenuBarPopupView: View {
                         .font(.subheadline)
                         .foregroundStyle(DesignTokens.Colors.textSecondary)
                 } else {
-                    Text("FineTune")
-                        .font(.headline)
-                        .accessibilityIdentifier("popup.title")
+                    defaultDevicesSummary
                 }
                 Spacer()
                 editPriorityButton
@@ -180,9 +178,9 @@ struct MenuBarPopupView: View {
             WindowAppearanceBridge(appearance: audioEngine.settingsManager.appSettings.appearance.nsAppearance)
                 .frame(width: 0, height: 0)
         )
-        .darkGlassBackground()
+        .darkGlassBackground(cornerRadius: DesignTokens.Dimensions.popupRadius)
         .overlay {
-            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.popupRadius, style: .continuous)
                 .strokeBorder(DesignTokens.Colors.popupBorder, lineWidth: 0.5)
         }
         .preferredColorScheme(audioEngine.settingsManager.appSettings.appearance.swiftUIColorScheme)
@@ -536,5 +534,32 @@ struct MenuBarPopupView: View {
         .fixedSize()
         .help("Choose output or input devices")
         .accessibilityIdentifier("devices.direction.picker")
+    }
+
+    /// Current default devices, centered in the header.
+    private var defaultDevicesSummary: some View {
+        let output = sortedDevices.first { $0.uid == deviceVolumeMonitor.defaultDeviceUID }?.name
+        let input = sortedInputDevices.first { $0.uid == deviceVolumeMonitor.defaultInputDeviceUID }?.name
+        return HStack(spacing: DesignTokens.Spacing.xs) {
+            if let output { defaultDeviceLabel(output, symbol: "speaker.wave.2.fill") }
+            if output != nil, input != nil {
+                Text(verbatim: "·").foregroundStyle(.tertiary)
+            }
+            if let input { defaultDeviceLabel(input, symbol: "mic.fill") }
+        }
+        .font(.caption)
+        .foregroundStyle(DesignTokens.Colors.textSecondary)
+        .padding(.horizontal, DesignTokens.Spacing.sm)
+        .padding(.vertical, DesignTokens.Spacing.xs)
+        .glassChip(in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("popup.defaultDevices")
+    }
+
+    private func defaultDeviceLabel(_ name: String, symbol: String) -> some View {
+        HStack(spacing: DesignTokens.Spacing.xxs) {
+            Image(systemName: symbol).imageScale(.small).accessibilityHidden(true)
+            Text(name).lineLimit(1).truncationMode(.middle)
+        }
     }
 }

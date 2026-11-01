@@ -115,7 +115,7 @@ struct DesignTokensDynamicResolutionTests {
                     equals: NSColor(white: 0.45, alpha: 1.0),
                     in: Self.aqua)
         expectColor(DesignTokens.Colors.autoEQEmptyIcon,
-                    equals: NSColor(white: 0.267, alpha: 1.0),
+                    equals: NSColor(white: 0.60, alpha: 1.0),
                     in: Self.darkAqua)
     }
 
@@ -125,8 +125,15 @@ struct DesignTokensDynamicResolutionTests {
                     equals: NSColor.black.withAlphaComponent(0.65),
                     in: Self.aqua)
         expectColor(DesignTokens.Colors.autoEQToggleLabel,
-                    equals: NSColor.white.withAlphaComponent(0.5),
+                    equals: NSColor.white.withAlphaComponent(0.60),
                     in: Self.darkAqua)
+    }
+
+    @Test("Increase Contrast strengthens translucent tokens and keeps clear ones clear")
+    func increasedContrast() {
+        let strengthened = DesignTokens.increasedContrast(NSColor.white.withAlphaComponent(0.60))
+        #expect(abs(strengthened.alphaComponent - 0.90) < 0.005)
+        #expect(DesignTokens.increasedContrast(.clear).alphaComponent == 0)
     }
 
     @Test("iconOnGlassEmphasis resolves correctly in light and dark")
@@ -203,7 +210,7 @@ struct DesignTokensDynamicResolutionTests {
                     equals: NSColor.black.withAlphaComponent(0.65),
                     in: Self.aqua)
         expectColor(DesignTokens.Colors.sectionHeaderText,
-                    equals: NSColor.white.withAlphaComponent(0.40),
+                    equals: NSColor.white.withAlphaComponent(0.60),
                     in: Self.darkAqua)
     }
 

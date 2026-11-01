@@ -89,7 +89,7 @@ struct AutoEQCurveView: View {
 
     private func drawGrid(context: inout GraphicsContext, size: CGSize) {
         let plotRect = CGRect(origin: .zero, size: size)
-        let gridColor = DesignTokens.Colors.glassRowBorder.opacity(0.65)
+        let gridColor = DesignTokens.Colors.separator
 
         // Vertical grid lines (frequency)
         for line in xGridLines {
@@ -117,7 +117,7 @@ struct AutoEQCurveView: View {
         path.addLine(to: CGPoint(x: size.width, y: zeroY))
         context.stroke(
             path,
-            with: .color(DesignTokens.Colors.glassRowBorder.opacity(0.9)),
+            with: .color(DesignTokens.Colors.textTertiary),
             style: StrokeStyle(lineWidth: 0.75, dash: [3, 2])
         )
     }

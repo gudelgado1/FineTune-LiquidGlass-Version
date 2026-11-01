@@ -61,6 +61,7 @@ struct FineTuneApp: App {
     @State private var resolver: TargetAppResolver
     @StateObject private var updateManager = UpdateManager()
     @State private var showMenuBarExtra = true
+    @State private var statusItemMenu = StatusItemMenu()
     @State private var customSettingsWindow: NSWindow?
 
     /// Snapshot icon computed at launch from the user's chosen style and the current
@@ -74,7 +75,12 @@ struct FineTuneApp: App {
         Settings {
             settingsContent
         }
-        FluidMenuBarExtra("FineTune", image: launchIconImage, isInserted: $showMenuBarExtra) {
+        FluidMenuBarExtra(
+            "FineTune",
+            image: launchIconImage,
+            isInserted: $showMenuBarExtra,
+            menu: statusItemMenu.configured(audioEngine: audioEngine, openSettings: openCustomSettingsWindow)
+        ) {
             menuBarContent
         }
         .volumeHUDAnchor(hudController.menuBarAnchor)
