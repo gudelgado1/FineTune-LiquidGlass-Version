@@ -75,9 +75,6 @@ struct MenuBarPopupView: View {
     /// Uses DisplayableApp.id (String) to work with both active and inactive apps
     @State var expandedRowID: String?
 
-    /// Debounce EQ toggle to prevent rapid clicks during animation
-    @State var isEQAnimating = false
-
     /// Track popup visibility to pause VU meter polling when hidden
     @State var isPopupVisible = true
 
@@ -341,7 +338,7 @@ struct MenuBarPopupView: View {
         .contentShape(Rectangle())
         .onHover { isEditButtonHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isEditButtonHovered)
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isEditingDevicePriority)
+        .animation(DesignTokens.Animation.disclosure, value: isEditingDevicePriority)
         .accessibilityLabel(isEditingDevicePriority ? "Done reordering" : "Reorder devices")
         .help(isEditingDevicePriority ? "Done reordering" : "Reorder devices")
     }
@@ -374,13 +371,13 @@ struct MenuBarPopupView: View {
     private func handleEscape() {
         if inlineEditor.dismissCurrent() { return }
         if expandedDeviceUID != nil {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 expandedDeviceUID = nil
             }
         } else if isEditingDevicePriority {
             toggleDevicePriorityEdit()
         } else if expandedRowID != nil {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 expandedRowID = nil
             }
         } else if showingOtherOutputs && !showingInputDevices {
@@ -523,7 +520,7 @@ struct MenuBarPopupView: View {
     /// Liquid Glass union header and the pre-26 capsule fallback.
     private var outputTabButton: some View {
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 showingInputDevices = false
             }
         } label: {
@@ -540,14 +537,14 @@ struct MenuBarPopupView: View {
         .buttonStyle(.plain)
         .onHover { isOutputTabHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isOutputTabHovered)
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: showingInputDevices)
+        .animation(DesignTokens.Animation.disclosure, value: showingInputDevices)
         .help("Output Devices")
     }
 
     /// Input tab button (mic).
     private var inputTabButton: some View {
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 showingInputDevices = true
             }
         } label: {
@@ -564,7 +561,7 @@ struct MenuBarPopupView: View {
         .buttonStyle(.plain)
         .onHover { isInputTabHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isInputTabHovered)
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: showingInputDevices)
+        .animation(DesignTokens.Animation.disclosure, value: showingInputDevices)
         .help("Input Devices")
     }
 

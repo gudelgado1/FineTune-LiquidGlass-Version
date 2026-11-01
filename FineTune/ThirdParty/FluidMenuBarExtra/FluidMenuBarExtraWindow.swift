@@ -96,6 +96,13 @@ final class FluidMenuBarExtraWindow<Content: View>: NSPanel {
         statusItem = nil
     }
 
+    /// Bound resizing across short and tall disclosures instead of relying on
+    /// AppKit's distance-dependent default. AppKit remains the only panel-frame
+    /// animation owner; the native search field is not cross-faded with the graph.
+    override func animationResizeTime(_ newFrame: NSRect) -> TimeInterval {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.30
+    }
+
     private func contentSizeDidUpdate(to size: CGSize) {
         guard frame.size != size else {
             return

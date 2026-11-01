@@ -218,7 +218,7 @@ struct DeviceRow: View {
                                         : DesignTokens.Colors.textTertiary
                                 )
                                 .rotationEffect(.degrees(isAutoEQExpanded ? 90 : 0))
-                                .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isAutoEQExpanded)
+                                .animation(DesignTokens.Animation.disclosure, value: isAutoEQExpanded)
                         }
                     }
 
@@ -240,7 +240,7 @@ struct DeviceRow: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 if autoEQProfileManager != nil {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                    withAnimation(DesignTokens.Animation.disclosure) {
                         onAutoEQToggleExpansion()
                     }
                 } else if !isDefault {

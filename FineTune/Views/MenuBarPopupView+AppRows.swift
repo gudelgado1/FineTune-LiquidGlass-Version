@@ -293,11 +293,8 @@ extension MenuBarPopupView {
 
     /// Toggle EQ panel for an app (shared between active and inactive rows)
     func toggleEQ(for appID: String, scrollProxy: ScrollViewProxy) {
-        guard !isEQAnimating else { return }
-        isEQAnimating = true
-
         let isExpanding = expandedRowID != appID
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+        withAnimation(DesignTokens.Animation.disclosure) {
             if expandedRowID == appID {
                 expandedRowID = nil
             } else {
@@ -306,11 +303,6 @@ extension MenuBarPopupView {
             if isExpanding {
                 scrollProxy.scrollTo(PopupKeyboardNavModel.RowID.app(persistenceID: appID), anchor: .top)
             }
-        }
-
-        Task {
-            try? await Task.sleep(for: .seconds(0.4))
-            isEQAnimating = false
         }
     }
 

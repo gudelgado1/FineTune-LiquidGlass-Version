@@ -10,6 +10,7 @@ struct ExpandableGlassRow<Header: View, ExpandedContent: View>: View {
     @ViewBuilder let header: Header
     @ViewBuilder let expandedContent: ExpandedContent
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
     var body: some View {
@@ -21,10 +22,8 @@ struct ExpandableGlassRow<Header: View, ExpandedContent: View>: View {
             if isExpanded {
                 expandedContent
                     .transition(
-                        .asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.98, anchor: .top)),
-                            removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .top))
-                        )
+                        reduceMotion ? .identity
+                            : .opacity.combined(with: .scale(scale: 0.98, anchor: .top))
                     )
             }
         }

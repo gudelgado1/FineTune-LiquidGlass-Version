@@ -5,6 +5,24 @@ import Testing
 
 @Suite("HUD to popup through status-item mouse monitors", .serialized)
 @MainActor struct HUDStatusClickTests {
+    @Test("reopening during a popup fade remains visible after old completions",
+          arguments: [false, true])
+    func reopenDuringFade(duringDismissal: Bool) async throws {
+        let title = "FineTune-fade-QA-\(UUID().uuidString)"
+        let popup = FluidMenuBarExtraWindow(title: title) { Text("Popup QA").padding(20) }
+        let item = FluidMenuBarExtraStatusItem(title: title, image: .systemNamed("speaker.fill"), window: popup)
+        defer { item.dismissWindow(animated: false) }
+        item.showWindow()
+        try await Task.sleep(for: .milliseconds(duringDismissal ? 250 : 60))
+        item.dismissWindow()
+        item.showWindow()
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(popup.isVisible)
+        #expect(popup.alphaValue == 1)
+        item.dismissWindow(animated: false)
+        #expect(!popup.isVisible)
+    }
+
     @Test("one status-item click opens popup with either monitor ordering", arguments: ["hud-first", "fluid-first", "global"])
     func firstClickPromotes(route: String) throws {
         let title = "FineTune-click-QA-\(UUID().uuidString)"

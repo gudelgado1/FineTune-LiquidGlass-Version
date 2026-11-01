@@ -61,7 +61,7 @@ extension MenuBarPopupView {
             ? audioEngine.settingsManager.inputDevicePriorityOrder
             : audioEngine.settingsManager.devicePriorityOrder
 
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+        withAnimation(DesignTokens.Animation.disclosure) {
             // Remove devices that disappeared
             editableDeviceOrder.removeAll { latestByUID[$0.uid] == nil }
 

@@ -107,7 +107,9 @@ extension MenuBarPopupView {
                     } label: {
                         HStack(spacing: 4) {
                             Text(showingOtherOutputs ? "Hide Other Outputs" : "Other Outputs (\(layout.alternatives.count))")
-                            Image(systemName: showingOtherOutputs ? "chevron.up" : "chevron.down")
+                            Image(systemName: "chevron.down")
+                                .rotationEffect(.degrees(showingOtherOutputs ? 180 : 0))
+                                .animation(DesignTokens.Animation.disclosure, value: showingOtherOutputs)
                         }
                     }
                     .buttonStyle(.borderless)
@@ -227,7 +229,7 @@ extension MenuBarPopupView {
             defaultDeviceUID: deviceVolumeMonitor.defaultDeviceUID,
             isExpanded: expandedRowID == Self.systemSoundsRowID,
             onToggleExpand: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                withAnimation(DesignTokens.Animation.disclosure) {
                     expandedRowID = (expandedRowID == Self.systemSoundsRowID) ? nil : Self.systemSoundsRowID
                 }
             },
@@ -235,11 +237,11 @@ extension MenuBarPopupView {
                 if let device = sortedDevices.first(where: { $0.uid == uid }) {
                     deviceVolumeMonitor.setSystemDeviceExplicit(device.id)
                 }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { expandedRowID = nil }
+                withAnimation(DesignTokens.Animation.disclosure) { expandedRowID = nil }
             },
             onSelectFollowDefault: {
                 deviceVolumeMonitor.setSystemFollowDefault()
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { expandedRowID = nil }
+                withAnimation(DesignTokens.Animation.disclosure) { expandedRowID = nil }
             }
         )
     }
@@ -268,7 +270,7 @@ extension MenuBarPopupView {
             onReorder: { newIndex in
                 guard let fromIndex = editableDeviceOrder.firstIndex(where: { $0.uid == device.uid }) else { return }
                 guard newIndex != fromIndex, newIndex >= 0, newIndex < editableDeviceOrder.count else { return }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                withAnimation(DesignTokens.Animation.disclosure) {
                     editableDeviceOrder.move(
                         fromOffsets: IndexSet(integer: fromIndex),
                         toOffset: newIndex > fromIndex ? newIndex + 1 : newIndex
@@ -279,7 +281,7 @@ extension MenuBarPopupView {
                 // Input devices have no per-device detail to show —
                 // only output devices carry a volume-tier override.
                 guard !showingInputDevices else { return }
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                withAnimation(DesignTokens.Animation.disclosure) {
                     expandedDeviceUID = (expandedDeviceUID == device.uid) ? nil : device.uid
                 }
             },
@@ -323,7 +325,7 @@ extension MenuBarPopupView {
                   let fromIndex = editableDeviceOrder.firstIndex(where: { $0.uid == droppedUID }),
                   let toIndex = editableDeviceOrder.firstIndex(where: { $0.uid == device.uid }),
                   fromIndex != toIndex else { return false }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 editableDeviceOrder.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: toIndex > fromIndex ? toIndex + 1 : toIndex)
             }
             return true

@@ -490,8 +490,18 @@ enum DesignTokens {
         /// Quick spring for small elements
         static let quick = SwiftUI.Animation.spring(response: 0.2, dampingFraction: 0.85)
 
-        /// Hover transition (brief and precise per HIG)
-        static let hover = SwiftUI.Animation.easeOut(duration: 0.12)
+        /// FineTune tuning, not prescribed HIG timings. Read the preference at
+        /// each interaction so AppKit-backed and SwiftUI controls agree.
+        static var hover: SwiftUI.Animation? {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                ? nil : .easeInOut(duration: 0.18)
+        }
+
+        /// A restrained, reversible disclosure with no extra bounce.
+        static var disclosure: SwiftUI.Animation? {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                ? nil : .smooth(duration: 0.30, extraBounce: 0)
+        }
 
         /// VU meter level change
         static let vuMeterLevel = SwiftUI.Animation.linear(duration: 0.05)

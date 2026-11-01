@@ -233,7 +233,7 @@ extension MenuBarPopupView {
             NSApp.keyWindow?.resignKey()
             return .handled
         case .app(let persistenceID):
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 expandedRowID = (expandedRowID == persistenceID) ? nil : persistenceID
             }
             return .handled
@@ -241,7 +241,7 @@ extension MenuBarPopupView {
     }
 
     func toggleDeviceTab() {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+        withAnimation(DesignTokens.Animation.disclosure) {
             showingInputDevices.toggle()
         }
     }

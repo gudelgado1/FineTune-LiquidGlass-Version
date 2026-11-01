@@ -173,10 +173,11 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
         guard !window.isVisible || popupIsDismissing else { return }
         popupDismissalGeneration += 1
         popupIsDismissing = false
+        let fadeIn = !window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         // A previous fade must not order out a newly reopened popup.
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
-            window.animator().alphaValue = 1
+            window.animator().alphaValue = fadeIn ? 0 : 1
         }
         setWindowFrame()
         if hudAnchor?.handlesNativeInteraction != true {
@@ -185,6 +186,13 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
         }
         window.makeKeyAndOrderFront(nil)
         hudAnchor?.setPopupVisible(true)
+        if fadeIn {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                window.animator().alphaValue = 1
+            }
+        }
     }
 
     var isVisible: Bool {
@@ -229,9 +237,12 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
             self.window.alphaValue = 1
             self.popupIsDismissing = false
         }
-        guard animated else { finish(); return }
+        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            finish()
+            return
+        }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.3
+            context.duration = 0.22
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             window.animator().alphaValue = 0
         } completionHandler: {
@@ -300,7 +311,9 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
             return
         }
 
-        window.setFrame(newFrame, display: true, animate: animate)
+        window.setFrame(newFrame, display: true,
+                        animate: animate && window.isVisible
+                            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
     }
 }
 

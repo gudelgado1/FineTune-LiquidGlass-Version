@@ -186,7 +186,7 @@ struct DeviceEditRow<ExpandedContent: View>: View {
         .onHover { isInfoButtonHovered = $0 }
         .help(isExpanded ? "Close device inspector" : "Device inspector")
         .accessibilityLabel(isExpanded ? "Close device inspector" : "Open device inspector")
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isExpanded)
+        .animation(DesignTokens.Animation.disclosure, value: isExpanded)
         .animation(DesignTokens.Animation.hover, value: isInfoButtonHovered)
     }
 }
@@ -352,7 +352,7 @@ struct DeviceEditRowTapCarveoutPreview: View {
                         lastEvent = "Reorder to \(newIndex + 1)"
                     },
                     onToggleExpand: {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        withAnimation(DesignTokens.Animation.disclosure) {
                             let uid = MockData.sampleDevices[0].uid
                             expandedUID = (expandedUID == uid) ? nil : uid
                             lastEvent = "Toggled expand → \(expandedUID ?? "nil")"
