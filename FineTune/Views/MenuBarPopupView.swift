@@ -109,14 +109,8 @@ struct MenuBarPopupView: View {
     /// like it did nothing.
     @State private var isRebuildingCapture = false
 
-    @State private var isOutputTabHovered = false
-    @State private var isInputTabHovered = false
     @State private var isEditButtonHovered = false
     @State private var isSettingsButtonHovered = false
-
-    /// Namespace for the device-tabs Liquid Glass union (macOS 26): lets the
-    /// speaker + mic glass capsules merge into one cohesive, morphing shape.
-    @Namespace private var deviceTabsGlass
 
     @State var navModel = PopupKeyboardNavModel()
     /// Delivers digits typed on the keyboard-selected row to that row's editor.
@@ -514,84 +508,27 @@ struct MenuBarPopupView: View {
               : "Rebuild app capture — use if an app's volume stops working or it's missing from the list")
     }
 
-    // MARK: - Device Tab Toggle
+    // MARK: - Device Direction
 
-    /// Output tab button (speaker). Extracted so it's reused by both the macOS 26
-    /// Liquid Glass union header and the pre-26 capsule fallback.
-    private var outputTabButton: some View {
-        Button {
-            withAnimation(DesignTokens.Animation.disclosure) {
-                showingInputDevices = false
-            }
-        } label: {
-            Image(systemName: "speaker.wave.2.fill")
-                .font(.system(size: 15, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(!showingInputDevices || isOutputTabHovered
-                    ? DesignTokens.Colors.iconOnGlassEmphasis
-                    : DesignTokens.Colors.interactiveDefault)
-                .frame(width: 28, height: 28)
-                .accessibilityIdentifier("devices.output.toggle")
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isOutputTabHovered = $0 }
-        .animation(DesignTokens.Animation.hover, value: isOutputTabHovered)
-        .animation(DesignTokens.Animation.disclosure, value: showingInputDevices)
-        .help("Output Devices")
-    }
-
-    /// Input tab button (mic).
-    private var inputTabButton: some View {
-        Button {
-            withAnimation(DesignTokens.Animation.disclosure) {
-                showingInputDevices = true
-            }
-        } label: {
-            Image(systemName: "mic.fill")
-                .font(.system(size: 15, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(showingInputDevices || isInputTabHovered
-                    ? DesignTokens.Colors.iconOnGlassEmphasis
-                    : DesignTokens.Colors.interactiveDefault)
-                .frame(width: 28, height: 28)
-                .accessibilityIdentifier("devices.input.toggle")
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isInputTabHovered = $0 }
-        .animation(DesignTokens.Animation.hover, value: isInputTabHovered)
-        .animation(DesignTokens.Animation.disclosure, value: showingInputDevices)
-        .help("Input Devices")
-    }
-
-    /// Icon-only toggle for switching between Output and Input devices.
-    /// macOS 26: each icon is its own Liquid Glass capsule, grouped in a
-    /// `GlassEffectContainer` and unioned (`glassEffectUnion`) so the two read as
-    /// one cohesive, morphing glass control. Pre-26: the original single capsule.
-    @ViewBuilder
+    /// A single-choice native control owns the selection highlight, hover,
+    /// keyboard focus and appearance. Only the content disclosure is animated
+    /// by FineTune; there is no second custom glass or sliding-background layer.
     private var deviceTabsHeader: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 8.0) {
-                HStack(spacing: 4.0) {
-                    outputTabButton
-                        .glassEffect()
-                        .glassEffectUnion(id: "deviceTabs", namespace: deviceTabsGlass)
-                    inputTabButton
-                        .glassEffect()
-                        .glassEffectUnion(id: "deviceTabs", namespace: deviceTabsGlass)
-                }
-            }
-        } else {
-            HStack(spacing: 0) {
-                outputTabButton
-                Rectangle()
-                    .fill(DesignTokens.Colors.glassRowBorder)
-                    .frame(width: 0.5, height: 14)
-                inputTabButton
-            }
-            .glassChip(in: Capsule())
-            .overlay(Capsule().strokeBorder(DesignTokens.Colors.glassRowBorder, lineWidth: 0.5))
+        Picker("Device Direction", selection: $showingInputDevices.animation(DesignTokens.Animation.disclosure)) {
+            Label("Output Devices", systemImage: showingInputDevices ? "speaker.wave.2" : "speaker.wave.2.fill")
+                .tag(false)
+            Label("Input Devices", systemImage: showingInputDevices ? "mic.fill" : "mic")
+                .tag(true)
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .labelStyle(.iconOnly)
+        .font(.system(size: 14, weight: .regular))
+        .imageScale(.medium)
+        .symbolRenderingMode(.monochrome)
+        .controlSize(.regular)
+        .fixedSize()
+        .help("Choose output or input devices")
+        .accessibilityIdentifier("devices.direction.picker")
     }
 }
