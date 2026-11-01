@@ -20,6 +20,12 @@ import Testing
         #expect(control.image(forSegment: 1)?.accessibilityDescription == "Input Devices")
         #expect(try #require(control.image(forSegment: 0)).size.width > 0)
         #expect(try #require(control.image(forSegment: 1)).size.width > 0)
+        let fitting = control.fittingSize
+        for index in 0..<2 {
+            let image = try #require(control.image(forSegment: index))
+            #expect(image.size.height <= fitting.height)
+            #expect(image.size.width <= fitting.width / 2)
+        }
     }
 
     @Test("native actions use the latest binding and external updates restore the selection")

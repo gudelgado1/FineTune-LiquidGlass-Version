@@ -311,9 +311,7 @@ final class FluidMenuBarExtraStatusItem: NSObject, NSWindowDelegate {
             return
         }
 
-        window.setFrame(newFrame, display: true,
-                        animate: animate && window.isVisible
-                            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        PopupFrameAnimation.apply(newFrame, to: window, animated: animate)
     }
 }
 
