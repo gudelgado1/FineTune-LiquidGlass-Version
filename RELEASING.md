@@ -41,8 +41,8 @@ SPARKLE_BIN="/path/to/SourcePackages/artifacts/sparkle/Sparkle/bin"
 ## Prepare a candidate
 
 Use Xcode 27+ and the pinned package resolution. Increment
-`CURRENT_PROJECT_VERSION` for each release; the v2 base uses build **4**, marketing
-version **1.0.2**. Sparkle compares build numbers, not marketing versions. Keep
+`CURRENT_PROJECT_VERSION` for each release; the v2 base is 1.1.0, build **4**; the next
+release needs build **5** or higher. Sparkle compares build numbers, not marketing versions. Keep
 preview build numbers below the next stable build and disable updates in QA.
 
 Build Release with the repository’s existing local ad hoc signing settings, then
@@ -75,7 +75,7 @@ verification. Test the update in isolated QA copies before publishing.
 Publishing the stable release/feed and merging the PR are separate review steps.
 Upload the verified archive as a GitHub Release asset. Only after the asset exists,
 add an item to `appcast-v2.xml` with its HTTPS URL, exact byte length, signature,
-`<sparkle:version>4</sparkle:version>`, short version `1.0.2` and the built app’s
+its `<sparkle:version>` build number, short version and the built app’s
 minimum macOS version. Do not add the new archive to the legacy feed.
 
 Follow [Sparkle’s publication guide](https://sparkle-project.org/documentation/publishing/).
