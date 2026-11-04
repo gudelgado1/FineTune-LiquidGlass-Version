@@ -5,6 +5,14 @@
         <link>https://github.com/gudelgado1/FineTune-LiquidGlass-Version</link>
         <description>Updates for manually installed builds using the v2 Ed25519 key.</description>
         <language>en</language>
-        <!-- Intentionally empty until a verified v2 release is published. -->
+        <item>
+            <title>Version 1.1.0</title>
+            <pubDate>Wed, 04 Nov 2026 13:42:37 +0000</pubDate>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/tag/v1.1.0</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/gudelgado1/FineTune-LiquidGlass-Version/releases/download/v1.1.0/FineTune.zip" sparkle:edSignature="CcINcaByIhQqAD72J+ntQfQGMWTJbZ8LOPeYYFZ0LTedpQxmbj0grJ9gwbmDPCgM1NNEF0tPT0BDnJSIKH9lDg==" length="9488832" type="application/octet-stream"/>
+        </item>
     </channel>
 </rss>
