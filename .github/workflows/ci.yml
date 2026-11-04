@@ -1,0 +1,93 @@
+name: Build and isolated tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    # SDK27 is required by the guarded expanded-interface delegate.
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          sw_vers
+          python3 - <<'PYCODE'
+          import subprocess
+          sdk = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-version'], text=True).strip()
+          if int(sdk.split('.')[0]) < 27:
+              raise SystemExit(f'macOS SDK27+ required, selected {sdk}')
+          PYCODE
+      - name: Cache pinned packages
+        uses: actions/cache@v4
+        with:
+          path: build/ci/SourcePackages
+          key: ${{ runner.os }}-${{ runner.arch }}-packages-${{ hashFiles('FineTune.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+      - name: Run all unit tests in the isolated host
+        run: python3 scripts/run-tests.py --build-dir build/ci
+      - name: Check DSP with Thread Sanitizer
+        run: |
+          python3 scripts/run-dsp-checks.py --sanitizer thread \
+            --build-dir build/ci/dsp-thread \
+            --atomics-path build/ci/SourcePackages/checkouts/swift-atomics > build/ci/dsp-thread.log 2>&1
+      - name: Check DSP with Address Sanitizer
+        run: |
+          python3 scripts/run-dsp-checks.py --sanitizer address \
+            --build-dir build/ci/dsp-address \
+            --atomics-path build/ci/SourcePackages/checkouts/swift-atomics > build/ci/dsp-address.log 2>&1
+      - name: Check native capture lifecycle with Thread Sanitizer
+        run: |
+          python3 scripts/run-tests.py --sanitizer thread \
+            --build-dir build/ci/native-tsan --packages-dir build/ci/SourcePackages \
+            --only FineTuneTests/ProcessTapCallbackHealthTests \
+            --only FineTuneTests/TapLifecycleIntegrationTests \
+            --only FineTuneTests/EnginePendingCaptureTests \
+            --only FineTuneTests/TapHALFailureTests \
+            --only FineTuneTests/HALRetirementQueueTests \
+            --only FineTuneTests/OwnedHALExecutorTests \
+            --only FineTuneTests/RealtimeSnapshotTests
+      - name: Build optimized Release
+        run: |
+          xcodebuild build \
+            -project FineTune.xcodeproj -scheme FineTune -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath build/ci/DerivedData \
+            -clonedSourcePackagesDirPath build/ci/SourcePackages \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO > build/ci/release.log 2>&1
+      - name: Package ad-hoc QA candidate
+        run: |
+          codesign --force --deep --sign - build/ci/DerivedData/Build/Products/Release/FineTune.app
+          codesign --verify --deep --strict build/ci/DerivedData/Build/Products/Release/FineTune.app
+          ditto -c -k --keepParent build/ci/DerivedData/Build/Products/Release/FineTune.app build/ci/FineTune-QA.zip
+          git rev-parse HEAD > build/ci/source-commit.txt
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finetune-validation-${{ github.run_id }}
+          path: |
+            build/ci/runs/
+            build/ci/native-tsan/runs/
+            build/ci/release.log
+            build/ci/FineTune-QA.zip
+            build/ci/source-commit.txt
+            build/ci/dsp-thread.log
+            build/ci/dsp-address.log
+            build/ci/dsp-thread/source-hashes.json
+            build/ci/dsp-address/source-hashes.json
+          if-no-files-found: warn
+          retention-days: 14

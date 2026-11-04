@@ -176,6 +176,12 @@ final class MockDeviceVolumeProviding: DeviceVolumeProviding {
         onMuteChanged?(deviceID, muted)
     }
 
+    func outputProcessingGain(for deviceID: AudioDeviceID) -> Float {
+        guard outputVolumeBackend(for: deviceID) == .software else { return 1.0 }
+        if muteStates[deviceID] ?? false { return 0.0 }
+        return volumes[deviceID] ?? 1.0
+    }
+
     var onVolumeChanged: ((AudioDeviceID, Float) -> Void)?
     var onMuteChanged: ((AudioDeviceID, Bool) -> Void)?
     var onDefaultDeviceChanged: ((String) -> Void)?
@@ -352,10 +358,10 @@ struct SettingsMigrationV10toV11Tests {
         #expect(decoded.softwareDeviceSavedVolumes.isEmpty)
     }
 
-    @Test("Re-encode after v10 decode bumps to v11 on a fresh Settings instance")
-    func defaultSettingsVersionIsEleven() {
+    @Test("A fresh Settings instance carries the current schema version")
+    func defaultSettingsVersionIsCurrent() {
         let fresh = SettingsManager.Settings()
-        #expect(fresh.version == 11)
+        #expect(fresh.version == 12)  // v12 added deviceIconOverrides
         #expect(fresh.deviceVolumeTierOverride.isEmpty)
     }
 
@@ -440,5 +446,29 @@ struct SettingsManagerDeviceVolumeTierOverrideRoundTrip {
     func defaultEmpty() {
         let s = SettingsManager.Settings()
         #expect(s.deviceVolumeTierOverride.isEmpty)
+    }
+}
+
+@Suite("DeviceVolumeMonitor — hardware zero volume")
+@MainActor
+struct HardwareZeroVolumeTests {
+    @Test("Popup path writes hardware mute when volume reaches zero")
+    func popupZeroWritesMute() {
+        let settings = SettingsManager(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        var writtenMute: Bool?
+        let monitor = DeviceVolumeMonitor(
+            deviceMonitor: AudioDeviceMonitor(),
+            settingsManager: settings,
+            backendResolver: { _ in .hardware },
+            outputVolumeWriter: { _, _ in true },
+            muteStateWriter: { _, muted in
+                writtenMute = muted
+                return true
+            }
+        )
+
+        monitor.setVolume(for: 42, to: 0)
+
+        #expect(writtenMute == true)
     }
 }

@@ -60,9 +60,9 @@ struct PermissionStatusControl: View {
     private func chip(_ text: String, systemImage: String, color: Color) -> some View {
         HStack(spacing: 4) {
             Image(systemName: systemImage)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(.caption, weight: .semibold))
             Text(text)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(.subheadline, weight: .medium))
         }
         .foregroundStyle(color)
         .padding(.horizontal, 8)

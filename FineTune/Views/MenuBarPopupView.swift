@@ -68,13 +68,12 @@ struct MenuBarPopupView: View {
 
     /// Which device tab is selected (false = output, true = input)
     @State var showingInputDevices = false
+    /// Alternatives are disclosed on demand so apps stay near the active output.
+    @State var showingOtherOutputs = false
 
     /// Track which app has its EQ panel expanded (only one at a time)
     /// Uses DisplayableApp.id (String) to work with both active and inactive apps
     @State var expandedRowID: String?
-
-    /// Debounce EQ toggle to prevent rapid clicks during animation
-    @State var isEQAnimating = false
 
     /// Track popup visibility to pause VU meter polling when hidden
     @State var isPopupVisible = true
@@ -105,17 +104,18 @@ struct MenuBarPopupView: View {
 
     /// Hover state for support link heart animation
     @State private var isSupportHovered = false
+    /// Manual capture rebuild running (footer button). Recreating every tap is
+    /// fast but not instant, so the button reports progress instead of looking
+    /// like it did nothing.
+    @State private var isRebuildingCapture = false
 
-    @State private var isOutputTabHovered = false
-    @State private var isInputTabHovered = false
     @State private var isEditButtonHovered = false
     @State private var isSettingsButtonHovered = false
 
-    /// Namespace for the device-tabs Liquid Glass union (macOS 26): lets the
-    /// speaker + mic glass capsules merge into one cohesive, morphing shape.
-    @Namespace private var deviceTabsGlass
-
     @State var navModel = PopupKeyboardNavModel()
+    /// Delivers digits typed on the keyboard-selected row to that row's editor.
+    @State var textEntry = PopupTextEntryCoordinator()
+    @State var inlineEditor = PopupInlineEditorContext()
     /// Logical keyboard-nav selection. Plain @State (not @FocusState) so reads
     /// and writes are synchronous within a single event handler — using
     /// @FocusState here raced with SwiftUI's auto-focus-on-key-window claim
@@ -150,7 +150,7 @@ struct MenuBarPopupView: View {
                         .font(.subheadline)
                         .foregroundStyle(DesignTokens.Colors.textSecondary)
                 } else {
-                    defaultDevicesStatus
+                    defaultDevicesSummary
                 }
                 Spacer()
                 editPriorityButton
@@ -178,13 +178,17 @@ struct MenuBarPopupView: View {
             WindowAppearanceBridge(appearance: audioEngine.settingsManager.appSettings.appearance.nsAppearance)
                 .frame(width: 0, height: 0)
         )
-        .darkGlassBackground()
+        .darkGlassBackground(cornerRadius: DesignTokens.Dimensions.popupRadius)
         .overlay {
-            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.popupRadius, style: .continuous)
                 .strokeBorder(DesignTokens.Colors.popupBorder, lineWidth: 0.5)
         }
         .preferredColorScheme(audioEngine.settingsManager.appSettings.appearance.swiftUIColorScheme)
         .environment(\.appearancePreference, audioEngine.settingsManager.appSettings.appearance)
+        .environment(\.popupInlineEditor, inlineEditor)
+        .onChange(of: inlineEditor.isPresented) { _, presented in
+            if !presented && isPopupVisible { anchorFocused = true }
+        }
         .onAppear {
             updateSortedDevices()
             updateSortedInputDevices()
@@ -234,6 +238,11 @@ struct MenuBarPopupView: View {
         }
         .onChange(of: deviceVolumeMonitor.defaultDeviceID) { _, _ in
             updateSortedDevices()
+            if !showingInputDevices && !isEditingDevicePriority {
+                setShowingOtherOutputs(false)
+            } else {
+                syncNavOrder()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
             // Global notification — fires for every window in the process. Filter to
@@ -260,6 +269,7 @@ struct MenuBarPopupView: View {
             else { return }
             isPopupVisible = false
             popupVisibility.isVisible = false
+            inlineEditor.dismissCurrent()
             hasKeyboardEngaged = false
             selectedRow = nil
         }
@@ -320,7 +330,7 @@ struct MenuBarPopupView: View {
         .contentShape(Rectangle())
         .onHover { isEditButtonHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isEditButtonHovered)
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isEditingDevicePriority)
+        .animation(DesignTokens.Animation.disclosure, value: isEditingDevicePriority)
         .accessibilityLabel(isEditingDevicePriority ? "Done reordering" : "Reorder devices")
         .help(isEditingDevicePriority ? "Done reordering" : "Reorder devices")
     }
@@ -351,16 +361,19 @@ struct MenuBarPopupView: View {
     /// `isEditingDevicePriority` so Escape collapses the row first rather than
     /// tearing down edit mode entirely.
     private func handleEscape() {
+        if inlineEditor.dismissCurrent() { return }
         if expandedDeviceUID != nil {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 expandedDeviceUID = nil
             }
         } else if isEditingDevicePriority {
             toggleDevicePriorityEdit()
         } else if expandedRowID != nil {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 expandedRowID = nil
             }
+        } else if showingOtherOutputs && !showingInputDevices {
+            setShowingOtherOutputs(false)
         } else {
             NSApp.keyWindow?.resignKey()
         }
@@ -384,22 +397,17 @@ struct MenuBarPopupView: View {
         // Section spacing tracks the chosen popup density (compact/comfortable/spacious).
         VStack(alignment: .leading, spacing: popupDimensions.sectionSpacing) {
             devicesSection
-
-            Divider()
-                .padding(.vertical, DesignTokens.Spacing.xs)
-
-            // Sound effects (system alert volume) sits between the device and app
-            // sections, bracketed by matching section dividers. Output tab only,
-            // hidden while reordering, and only when the user keeps it enabled.
-            if !showingInputDevices && !isEditingDevicePriority
-                && audioEngine.settingsManager.appSettings.showSoundEffectsRow {
-                systemSoundsRow
-
-                Divider()
-                    .padding(.vertical, DesignTokens.Spacing.xs)
-            }
+                .padding(.bottom, DesignTokens.Spacing.sm)
 
             appsSection(scrollProxy: scrollProxy)
+
+            // Keep secondary system sounds available after the main app controls.
+            if !showingInputDevices && !isEditingDevicePriority
+                && audioEngine.settingsManager.appSettings.showSoundEffectsRow {
+                SectionHeader(title: "System")
+                    .padding(.top, DesignTokens.Spacing.sm)
+                systemSoundsRow
+            }
 
             Divider()
                 .padding(.vertical, DesignTokens.Spacing.xs)
@@ -413,7 +421,7 @@ struct MenuBarPopupView: View {
                 }
                 .buttonStyle(.plain)
                 .font(.system(.callout, weight: .regular))
-                .foregroundStyle(isSupportHovered ? Color(nsColor: .systemPink) : DesignTokens.Colors.textTertiary)
+                .foregroundStyle(isSupportHovered ? Color(nsColor: .systemPink) : DesignTokens.Colors.textSecondary)
                 .onHover { hovering in
                     withAnimation(DesignTokens.Animation.hover) {
                         isSupportHovered = hovering
@@ -423,6 +431,8 @@ struct MenuBarPopupView: View {
                 .help("Donate to FineTune")
 
                 Spacer()
+
+                rebuildCaptureButton
 
                 Button {
                     NSApplication.shared.terminate(nil)
@@ -445,130 +455,108 @@ struct MenuBarPopupView: View {
         }
     }
 
-    // MARK: - Default Devices Status
+    // MARK: - Rebuild Capture
 
-    /// Name of the current default output device
-    private var defaultOutputDeviceName: String {
-        guard let uid = deviceVolumeMonitor.defaultDeviceUID,
-              let device = sortedDevices.first(where: { $0.uid == uid }) else {
-            return "No Output"
-        }
-        return device.name
-    }
-
-    /// Name of the current default input device
-    private var defaultInputDeviceName: String {
-        guard let uid = deviceVolumeMonitor.defaultInputDeviceUID,
-              let device = sortedInputDevices.first(where: { $0.uid == uid }) else {
-            return "No Input"
-        }
-        return device.name
-    }
-
-    /// Pill showing both default devices in the header center.
-    private var defaultDevicesStatus: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "speaker.wave.2.fill")
-                .font(.system(size: 10))
-            Text(defaultOutputDeviceName)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Text("·")
-                .foregroundStyle(DesignTokens.Colors.textTertiary)
-
-            Image(systemName: "mic.fill")
-                .font(.system(size: 10))
-            Text(defaultInputDeviceName)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .font(.subheadline)
-        .foregroundStyle(DesignTokens.Colors.textSecondary)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .glassChip(in: Capsule())
-        .overlay(Capsule().strokeBorder(DesignTokens.Colors.glassRowBorder, lineWidth: 0.5))
-    }
-
-    // MARK: - Device Tab Toggle
-
-    /// Output tab button (speaker). Extracted so it's reused by both the macOS 26
-    /// Liquid Glass union header and the pre-26 capsule fallback.
-    private var outputTabButton: some View {
-        Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                showingInputDevices = false
-            }
-        } label: {
-            Image(systemName: "speaker.wave.2.fill")
-                .font(.system(size: 15, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(!showingInputDevices || isOutputTabHovered
-                    ? DesignTokens.Colors.iconOnGlassEmphasis
-                    : DesignTokens.Colors.interactiveDefault)
-                .frame(width: 28, height: 28)
-                .accessibilityIdentifier("devices.output.toggle")
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isOutputTabHovered = $0 }
-        .animation(DesignTokens.Animation.hover, value: isOutputTabHovered)
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: showingInputDevices)
-        .help("Output Devices")
-    }
-
-    /// Input tab button (mic).
-    private var inputTabButton: some View {
-        Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                showingInputDevices = true
-            }
-        } label: {
-            Image(systemName: "mic.fill")
-                .font(.system(size: 15, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(showingInputDevices || isInputTabHovered
-                    ? DesignTokens.Colors.iconOnGlassEmphasis
-                    : DesignTokens.Colors.interactiveDefault)
-                .frame(width: 28, height: 28)
-                .accessibilityIdentifier("devices.input.toggle")
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isInputTabHovered = $0 }
-        .animation(DesignTokens.Animation.hover, value: isInputTabHovered)
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: showingInputDevices)
-        .help("Input Devices")
-    }
-
-    /// Icon-only toggle for switching between Output and Input devices.
-    /// macOS 26: each icon is its own Liquid Glass capsule, grouped in a
-    /// `GlassEffectContainer` and unioned (`glassEffectUnion`) so the two read as
-    /// one cohesive, morphing glass control. Pre-26: the original single capsule.
+    /// Recreates every per-app tap. Sits next to Quit because it's the fix the
+    /// user reaches for when an app's volume stops responding or an app that is
+    /// playing never shows up — having it here avoids a trip to Settings.
+    /// Disabled while the audio system itself is unresponsive: rebuilding is all
+    /// HAL work, so Settings ▸ Troubleshooting ▸ Reset Core Audio is the fix then.
     @ViewBuilder
-    private var deviceTabsHeader: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 8.0) {
-                HStack(spacing: 4.0) {
-                    outputTabButton
-                        .glassEffect()
-                        .glassEffectUnion(id: "deviceTabs", namespace: deviceTabsGlass)
-                    inputTabButton
-                        .glassEffect()
-                        .glassEffectUnion(id: "deviceTabs", namespace: deviceTabsGlass)
+    private var rebuildCaptureButton: some View {
+        let audioSystemDown = !audioEngine.audioSystemHealth.allowsPeriodicHALWork
+
+        Button {
+            guard !isRebuildingCapture else { return }
+            // Set synchronously, before the Task: `.disabled` only re-evaluates
+            // after this flag flips, so flipping it inside the Task would let
+            // two clicks in the same runloop turn both start a rebuild.
+            isRebuildingCapture = true
+            Task {
+                await audioEngine.rebuildAllTaps()
+                isRebuildingCapture = false
+            }
+        } label: {
+            Group {
+                if isRebuildingCapture {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(.title3, weight: .regular))
+                        .symbolRenderingMode(.hierarchical)
                 }
             }
+            .frame(
+                minWidth: DesignTokens.Dimensions.minTouchTarget,
+                minHeight: DesignTokens.Dimensions.minTouchTarget
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(DesignTokens.Colors.interactiveDefault)
+        .iconButtonStyle()
+        .disabled(isRebuildingCapture || audioSystemDown)
+        .accessibilityLabel("Rebuild app capture")
+        .help(audioSystemDown
+              ? "Audio system isn't responding — reset Core Audio in Settings"
+              : "Rebuild app capture — use if an app's volume stops working or it's missing from the list")
+    }
+
+    // MARK: - Device Direction
+
+    /// Configure the native tab role and capsule shape together. The control
+    /// retains system selection/press artwork without an extra glass layer.
+    @ViewBuilder
+    private var deviceTabsHeader: some View {
+        if #available(macOS 27.0, *) {
+            DeviceDirectionControl(showingInput: $showingInputDevices.animation(DesignTokens.Animation.disclosure))
+                .fixedSize()
         } else {
-            HStack(spacing: 0) {
-                outputTabButton
-                Rectangle()
-                    .fill(DesignTokens.Colors.glassRowBorder)
-                    .frame(width: 0.5, height: 14)
-                inputTabButton
+            deviceDirectionPicker.pickerStyle(.segmented)
+        }
+    }
+
+    private var deviceDirectionPicker: some View {
+        Picker("Device Direction", selection: $showingInputDevices.animation(DesignTokens.Animation.disclosure)) {
+            Label("Output Devices", systemImage: showingInputDevices ? "speaker.wave.2" : "speaker.wave.2.fill")
+                .tag(false)
+            Label("Input Devices", systemImage: showingInputDevices ? "mic.fill" : "mic")
+                .tag(true)
+        }
+        .labelsHidden()
+        .labelStyle(.iconOnly)
+        .imageScale(.medium)
+        .symbolRenderingMode(.monochrome)
+        .fixedSize()
+        .help("Choose output or input devices")
+        .accessibilityIdentifier("devices.direction.picker")
+    }
+
+    /// Current default devices, centered in the header.
+    private var defaultDevicesSummary: some View {
+        let output = sortedDevices.first { $0.uid == deviceVolumeMonitor.defaultDeviceUID }?.name
+        let input = sortedInputDevices.first { $0.uid == deviceVolumeMonitor.defaultInputDeviceUID }?.name
+        return HStack(spacing: DesignTokens.Spacing.xs) {
+            if let output { defaultDeviceLabel(output, symbol: "speaker.wave.2.fill") }
+            if output != nil, input != nil {
+                Text(verbatim: "·").foregroundStyle(.tertiary)
             }
-            .glassChip(in: Capsule())
-            .overlay(Capsule().strokeBorder(DesignTokens.Colors.glassRowBorder, lineWidth: 0.5))
+            if let input { defaultDeviceLabel(input, symbol: "mic.fill") }
+        }
+        .font(.caption)
+        .foregroundStyle(DesignTokens.Colors.textSecondary)
+        .padding(.horizontal, DesignTokens.Spacing.sm)
+        .padding(.vertical, DesignTokens.Spacing.xs)
+        .glassChip(in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("popup.defaultDevices")
+    }
+
+    private func defaultDeviceLabel(_ name: String, symbol: String) -> some View {
+        HStack(spacing: DesignTokens.Spacing.xxs) {
+            Image(systemName: symbol).imageScale(.small).accessibilityHidden(true)
+            Text(name).lineLimit(1).truncationMode(.middle)
         }
     }
 }

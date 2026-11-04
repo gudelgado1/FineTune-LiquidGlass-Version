@@ -8,7 +8,7 @@ extension AudioObjectID {
     /// Check if an audio device is currently alive and operational.
     /// Uses kAudioDevicePropertyDeviceIsAlive to verify device state.
     /// - Returns: `true` if device is alive, `false` if dead or query fails.
-    func isDeviceAlive() -> Bool {
+    nonisolated func isDeviceAlive() -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsAlive,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -32,13 +32,13 @@ extension AudioObjectID {
     /// Only a `kAudioHardwareBadObjectError`/`BadDeviceError` (the object no
     /// longer exists — exactly what a `coreaudiod` restart produces) is treated
     /// as definitively gone.
-    enum DeviceLiveness {
+    nonisolated enum DeviceLiveness {
         case alive
         case dead       // definitively gone (object no longer exists)
         case unknown    // transient query failure — caller should assume alive
     }
 
-    func deviceLiveness() -> DeviceLiveness {
+    nonisolated func deviceLiveness() -> DeviceLiveness {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsAlive,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -65,7 +65,7 @@ extension AudioObjectID {
     /// - Warning: This method blocks the calling thread via CFRunLoopRunInMode. Do not call from the main thread without careful consideration.
     /// - Note: Uses CFRunLoopRunInMode to allow Core Audio HAL events to be processed
     ///         during the wait. This is critical for aggregate device initialization.
-    func waitUntilReady(timeout: TimeInterval = 1.0, pollInterval: TimeInterval = 0.01) -> Bool {
+    nonisolated func waitUntilReady(timeout: TimeInterval = 1.0, pollInterval: TimeInterval = 0.01) -> Bool {
         let deadline = CFAbsoluteTimeGetCurrent() + timeout
 
         while CFAbsoluteTimeGetCurrent() < deadline {

@@ -83,3 +83,7 @@ Distribution/
 Archives/
 *.app.zip
 *.pkg
+
+# Python test-runner caches
+__pycache__/
+*.pyc

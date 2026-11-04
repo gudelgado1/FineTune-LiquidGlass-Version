@@ -1,6 +1,6 @@
 import Foundation
 
-enum LoudnessEqualizerMath {
+nonisolated enum LoudnessEqualizerMath {
     static func dbToLinear(_ db: Float) -> Float {
         pow(10, db / 20)
     }
@@ -11,10 +11,6 @@ enum LoudnessEqualizerMath {
 
     static func meanSquareToDb(_ meanSquare: Float) -> Float {
         10 * log10(max(meanSquare, 1e-12))
-    }
-
-    static func rmsFromMeanSquare(_ meanSquare: Float) -> Float {
-        sqrt(max(meanSquare, 0))
     }
 
     static func clamp(_ value: Float, min: Float, max: Float) -> Float {

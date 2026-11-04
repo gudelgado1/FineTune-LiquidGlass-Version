@@ -7,7 +7,7 @@ import Foundation
 /// coefficients. Any interpolation exposed here is deliberately kept separate
 /// from the normative contour calculation and is only used for fitting the
 /// 29-point contour to the app's fixed EQ band centers.
-enum ISO226Contours {
+nonisolated enum ISO226Contours {
 
     // MARK: - ISO 226:2023 Table 1
 

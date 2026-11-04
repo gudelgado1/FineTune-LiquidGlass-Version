@@ -27,6 +27,15 @@ final class AudioEngine {
 
     /// Closure to check if a device is alive. Overridable for testing.
     let isAliveCheck: (AudioDeviceID) -> Bool
+    let targetLivenessQuery: @MainActor ([AudioDeviceID]) async -> Bool?
+    @ObservationIgnored var livenessCheckInFlight = false
+
+    /// Whether a device's audio dies with the display (DisplayPort/HDMI).
+    /// Overridable for testing. Used by the screens-wake force rebuild: a
+    /// monitor's audio device can revive after display sleep as a zombie whose
+    /// IO proc keeps firing while output goes nowhere — invisible to both the
+    /// callback-timing checks and the aggregate-liveness watchdog.
+    let isDisplayTransport: (AudioDeviceID) -> Bool
 
     /// One-shot HAL listeners for devices that were present but not alive during priority resolution.
     /// Keyed by AudioDeviceID. Each entry holds the device UID, listener block, and a timeout task.
@@ -58,6 +67,23 @@ final class AudioEngine {
     /// `ensureTap*` skip PIDs in this set to close that race. `@ObservationIgnored`
     /// — pure coordination state, never observed by the UI.
     @ObservationIgnored var pidsBeingRecreated: Set<pid_t> = []
+    /// Ownership of each asynchronous recreation; reset/stop invalidates old work.
+    @ObservationIgnored var tapRecreationTokens: [pid_t: UUID] = [:]
+    /// Async capture placeholders remain visible while creation is pending.
+    /// Tokens reject completion after stop, ignore, reset or replacement.
+    @ObservationIgnored var pidsBeingCreated: Set<pid_t> = []
+    @ObservationIgnored var creationTokens: [pid_t: UUID] = [:]
+    @ObservationIgnored var captureRebuildTask: Task<Int?, Never>?
+    @ObservationIgnored var pendingTapTeardowns: [UUID: Task<Bool, Never>] = [:]
+    /// Reads the HAL's registered audio process objects. Injectable for tests.
+    /// Used to distinguish a *paused* app (process objects still registered)
+    /// from a *quit* app in warm-tap retention and post-wake recovery.
+    let liveProcessObjectIDs: () -> Set<AudioObjectID>
+    /// Wake queries run on a HAL worker using only immutable device IDs.
+    let wakeRecoveryQuery: @Sendable ([AudioDeviceID]) -> WakeRecoverySnapshot?
+    let wakeRecoveryTimeout: TimeInterval
+    @ObservationIgnored var wakeRecoveryQueryInFlight = false
+    @ObservationIgnored var wakeRecoveryGeneration: UInt64 = 0
     var diagnostics = AudioEngineDiagnostics()
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "AudioEngine")
 
@@ -71,6 +97,11 @@ final class AudioEngine {
     /// System-wake observer token. Wake from sleep loses audio state much like an
     /// overload does, so we revalidate taps on wake too.
     @ObservationIgnored var wakeObserver: NSObjectProtocol?
+    /// Screens-wake observer token. Desktops held awake by power assertions
+    /// NEVER post `didWakeNotification` — the machine only display-sleeps. But
+    /// display sleep still kills DisplayPort/HDMI audio, so `screensDidWake` is
+    /// the recovery trigger that actually fires on those machines.
+    @ObservationIgnored var screensWakeObserver: NSObjectProtocol?
     /// App-activation observer token. Revalidates tap liveness when the user
     /// brings FineTune to the foreground — a cheap "make sure audio is healthy
     /// right now" trigger.
@@ -79,6 +110,12 @@ final class AudioEngine {
     /// critical memory pressure. Tracked so we toggle (and re-apply to new taps)
     /// exactly once per transition.
     @ObservationIgnored var isDSPLoadShed = false
+
+    /// Circuit breaker for a wedged `coreaudiod`. While it reports the audio
+    /// system unresponsive, all periodic HAL work stops: continuing would strand
+    /// a thread per tick in the kernel and (before the off-main refactor) froze
+    /// the app outright. Observed by the UI to explain the silence to the user.
+    let audioSystemHealth = AudioSystemHealth()
 
     // MARK: - Priority State Machine
 
@@ -125,6 +162,10 @@ final class AudioEngine {
         deviceVolumeMonitor: (any DeviceVolumeProviding)? = nil,
         tapFactory: (@MainActor (AudioApp, [String], String?) throws -> any ProcessTapControlling)? = nil,
         isAlive: ((AudioDeviceID) -> Bool)? = nil,
+        liveProcessObjects: (() -> Set<AudioObjectID>)? = nil,
+        isDisplayTransport: ((AudioDeviceID) -> Bool)? = nil,
+        wakeRecoveryQuery: (@Sendable ([AudioDeviceID]) -> WakeRecoverySnapshot?)? = nil,
+        wakeRecoveryTimeout: TimeInterval = 4.0,
         startMonitorsAutomatically: Bool = true
     ) {
         self.permission = permission ?? AudioRecordingPermission()
@@ -133,6 +174,22 @@ final class AudioEngine {
         self.autoEQProfileManager = autoEQProfileManager ?? AutoEQProfileManager()
         self.volumeState = VolumeState(settingsManager: manager)
         self.isAliveCheck = isAlive ?? { $0.isDeviceAlive() }
+        if let isAlive {
+            self.targetLivenessQuery = { ids in ids.contains(where: isAlive) }
+        } else {
+            self.targetLivenessQuery = { ids in
+                await HALExecutor.run(timeout: 2.0) {
+                    ids.contains { $0.deviceLiveness() == .alive }
+                }
+            }
+        }
+        self.liveProcessObjectIDs = liveProcessObjects ?? { Set((try? AudioObjectID.readProcessList()) ?? []) }
+        self.wakeRecoveryQuery = wakeRecoveryQuery ?? WakeRecoverySnapshot.read
+        self.wakeRecoveryTimeout = wakeRecoveryTimeout
+        self.isDisplayTransport = isDisplayTransport ?? {
+            let transport = $0.readTransportType()
+            return transport == .displayPort || transport == .hdmi
+        }
 
         // If a custom deviceProvider is given, use it directly.
         // Otherwise create a real AudioDeviceMonitor (needed by DeviceVolumeMonitor and default tap factory).
@@ -204,8 +261,19 @@ final class AudioEngine {
         // Wire callbacks — needed for both test and production mode
         wireCallbacks()
 
+        // The process monitor is the busiest HAL caller, so it both feeds and
+        // obeys the breaker. When the daemon comes back, rebuild everything:
+        // device and process IDs from before the outage are all stale.
+        (processMonitor as? AudioProcessMonitor)?.health = audioSystemHealth
+        audioSystemHealth.onRecovered = { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.resyncAfterCoreAudioRestart()
+            }
+        }
+
         if startMonitorsAutomatically {
             Task { @MainActor in
+                DiagnosticLog.log("engine: monitors starting (capture permission=\(String(describing: self.permission.status)))")
                 if self.permission.status == .authorized {
                     self.processMonitor.start()
                     // CRITICAL: previously the tap health monitor only started via
@@ -275,16 +343,16 @@ final class AudioEngine {
 
     /// Wire all event callbacks from monitors to AudioEngine handlers.
     private func wireCallbacks() {
+        settingsManager.onSettingsImported = { [weak self] in self?.synchronizeReplacedSettings() }
         // Sync device volume changes to taps for VU meter accuracy
         deviceVolumeMonitor.onVolumeChanged = { [weak self] deviceID, newVolume in
             guard let self else { return }
             guard let deviceUID = self.deviceMonitor.outputDevices.first(where: { $0.id == deviceID })?.uid else { return }
             let loudnessEnabled = self.settingsManager.appSettings.loudnessCompensationEnabled
             for (_, tap) in self.taps {
-                if tap.currentDeviceUID == deviceUID {
+                if tap.currentDeviceUIDs.contains(deviceUID) {
                     tap.currentDeviceVolume = newVolume
-                    if tap.currentDeviceUIDs.count == 1,
-                       self.outputVolumeBackend(for: deviceID) == .software {
+                    if self.outputVolumeBackend(for: deviceID) == .software {
                         tap.volume = self.effectiveVolume(for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
                     }
                     tap.updateLoudnessCompensation(
@@ -299,10 +367,9 @@ final class AudioEngine {
             guard let self else { return }
             guard let deviceUID = self.deviceMonitor.outputDevices.first(where: { $0.id == deviceID })?.uid else { return }
             for (_, tap) in self.taps {
-                if tap.currentDeviceUID == deviceUID {
+                if tap.currentDeviceUIDs.contains(deviceUID) {
                     tap.isDeviceMuted = isMuted
-                    if tap.currentDeviceUIDs.count == 1,
-                       self.outputVolumeBackend(for: deviceID) == .software {
+                    if self.outputVolumeBackend(for: deviceID) == .software {
                         tap.volume = self.effectiveVolume(for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
                     }
                 }
@@ -325,11 +392,13 @@ final class AudioEngine {
         }
 
         deviceMonitor.onDeviceDisconnected = { [weak self] deviceUID, deviceName in
+            DiagnosticLog.log("device: DISCONNECTED \(deviceName) (\(deviceUID))")
             self?.handleDeviceDisconnected(deviceUID, name: deviceName)
             self?.bluetoothDeviceMonitor.refresh()
         }
 
         deviceMonitor.onDeviceConnected = { [weak self] deviceUID, deviceName in
+            DiagnosticLog.log("device: CONNECTED \(deviceName) (\(deviceUID))")
             self?.handleDeviceConnected(deviceUID, name: deviceName)
             self?.bluetoothDeviceMonitor.notifyDeviceAppearedInCoreAudio()
         }
@@ -354,6 +423,7 @@ final class AudioEngine {
         }
 
         deviceVolumeMonitor.onDefaultDeviceChanged = { [weak self] newDefaultUID in
+            DiagnosticLog.log("device: default output changed → \(newDefaultUID)")
             self?.handleDefaultDeviceChanged(newDefaultUID)
         }
 
@@ -389,8 +459,14 @@ final class AudioEngine {
     }
 
     func stop() {
+        captureRebuildTask?.cancel()
         stopHealthMonitor()
         stopResilienceObservers()
+        tapRecreationTokens.removeAll()
+        creationTokens.removeAll()
+        pidsBeingCreated.removeAll()
+        pidsBeingRecreated.removeAll()
+        audioSystemHealth.stop()
         processMonitor.stop()
         deviceMonitor.stop()
         for tap in taps.values {
@@ -414,32 +490,41 @@ final class AudioEngine {
     /// Resets all persisted settings and synchronizes in-memory engine state.
     /// Active taps are kept alive but reverted to defaults (unity volume, unmuted, flat EQ).
     func handleSettingsReset() {
-        // 1. Clear persisted state
         settingsManager.resetAllSettings()
+        synchronizeReplacedSettings()
+    }
 
-        // 2. Clear in-memory routing and tracking state
+    /// Import/reset replace the stored snapshot. Drop PID caches and restore
+    /// both active apps and warm taps retained while their apps are paused.
+    func synchronizeReplacedSettings() {
+        let warmApps = taps.values.map { $0.app }
         appliedPIDs.removeAll()
         appDeviceRouting.removeAll()
         followsDefault.removeAll()
-
-        // 3. Clear cached per-app audio state
         volumeState.resetAll()
-
-        // 4. Refresh output state caches so software-backed devices reset to defaults.
         deviceVolumeMonitor.refreshOutputDeviceStates()
 
-        // 5. Push defaults to all active taps
-        for tap in taps.values {
-            applyTapOutputState(to: tap, for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
-            tap.updateEQSettings(.flat)
-            tap.updateAutoEQProfile(nil)
-            tap.updateLoudnessCompensation(volume: effectiveLoudnessVolume(for: tap), enabled: false)
+        for (pid, tap) in Array(taps) {
+            if settingsManager.isIgnored(tap.app.persistenceIdentifier) {
+                taps.removeValue(forKey: pid)
+                tap.invalidate()
+                continue
+            }
+            let identifier = tap.app.persistenceIdentifier
+            _ = volumeState.loadSavedVolume(for: pid, identifier: identifier)
+            _ = volumeState.loadSavedMute(for: pid, identifier: identifier)
+            _ = volumeState.loadSavedBoost(for: pid, identifier: identifier)
+            applyTapOutputState(to: tap, for: pid, deviceUIDs: tap.currentDeviceUIDs)
+            let dsp = initialDSPConfiguration(for: tap, deviceUIDs: tap.currentDeviceUIDs)
+            tap.updateEQSettings(dsp.eq)
+            tap.setAutoEQPreampEnabled(dsp.autoEQPreampEnabled)
+            tap.updateAutoEQProfile(dsp.autoEQProfile)
+            tap.updateLoudnessEqualization(dsp.loudnessEqualization)
+            tap.updateLoudnessCompensation(volume: dsp.loudnessVolume, enabled: dsp.loudnessCompensationEnabled)
+            if dsp.autoEQProfile == nil { applyAutoEQToTap(tap) }
         }
-
-        // 6. Re-apply from clean settings (re-establishes routing to system default)
-        applyPersistedSettings()
-
-        logger.info("Settings reset: engine state synchronized")
+        applyPersistedSettings(additionalApps: warmApps)
+        logger.info("Replaced settings: engine state synchronized")
     }
 
     func setVolume(for app: AudioApp, to volume: Float) {
@@ -479,13 +564,21 @@ final class AudioEngine {
     /// single-device software output gain for software-backed devices.
     /// Single-device-routed apps on `.software`-backed devices always receive the
     /// device's software gain; multi-destination routing keeps `appGain` alone
-    /// because per-device software gain has no unambiguous meaning across fan-out.
+    /// except when every routed software device is at zero, which is unambiguous silence.
     func effectiveVolume(for pid: pid_t, deviceUIDs: [String]? = nil) -> Float {
         let appGain = volumeState.getVolume(for: pid) * volumeState.getBoost(for: pid).rawValue
 
-        guard let resolvedUIDs = deviceUIDs, resolvedUIDs.count == 1,
-              let primaryUID = resolvedUIDs.first,
-              let device = deviceMonitor.device(for: primaryUID),
+        guard let resolvedUIDs = deviceUIDs else { return appGain }
+        let devices = resolvedUIDs.compactMap { deviceMonitor.device(for: $0) }
+        if resolvedUIDs.count > 1,
+           devices.count == resolvedUIDs.count,
+           devices.allSatisfy({ outputVolumeBackend(for: $0.id) == .software }),
+           devices.allSatisfy({ deviceVolumeMonitor.outputProcessingGain(for: $0.id) == 0 }) {
+            return 0
+        }
+
+        guard resolvedUIDs.count == 1,
+              let device = devices.first,
               outputVolumeBackend(for: device.id) == .software else {
             return appGain
         }
@@ -563,11 +656,6 @@ final class AudioEngine {
     }
 
     // MARK: - Per-Device AutoEQ
-
-    func getAutoEQProfile(for deviceUID: String) -> AutoEQProfile? {
-        guard let selection = settingsManager.getAutoEQSelection(for: deviceUID) else { return nil }
-        return autoEQProfileManager.profile(for: selection.profileID)
-    }
 
     func setAutoEQProfile(for deviceUID: String, profileID: String?) {
         if let profileID {
@@ -655,7 +743,7 @@ final class AudioEngine {
         Task { @MainActor in
             guard let profile = await autoEQProfileManager.resolveProfile(for: selection.profileID) else { return }
             // Verify tap still exists and is still routed to the same device
-            guard tap.currentDeviceUID == deviceUID else { return }
+            guard taps[tap.app.id] === tap, tap.currentDeviceUID == deviceUID else { return }
             guard let latestSelection = settingsManager.getAutoEQSelection(for: deviceUID),
                   latestSelection.profileID == selection.profileID,
                   latestSelection.isEnabled else { return }
@@ -722,6 +810,7 @@ final class AudioEngine {
         }
 
         // Switch tap if needed
+        cancelPendingCreation(for: app.id)
         guard let targetUID = appDeviceRouting[app.id] else { return }
         let preferredTapSourceUID = preferredTapSourceDeviceUID(forOutputUIDs: [targetUID], isFollowsDefault: followsDefault.contains(app.id))
         if let tap = taps[app.id] {

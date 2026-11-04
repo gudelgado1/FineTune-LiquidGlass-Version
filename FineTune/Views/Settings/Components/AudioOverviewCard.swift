@@ -7,8 +7,7 @@ import SwiftUI
 /// purpose is orientation: a returning user can verify "yes, my AirPods are
 /// the default and Loudness is on" without scanning every section.
 ///
-/// Layout is a 2×2 grid of compact info chips. Falls back gracefully when a
-/// device is missing (e.g. no input mic plugged in).
+/// Aligned property rows keep long device names readable without truncation.
 @MainActor
 struct AudioOverviewCard: View {
     @Bindable var settings: SettingsManager
@@ -48,85 +47,29 @@ struct AudioOverviewCard: View {
     // MARK: - Body
 
     var body: some View {
-        // 2×2 grid keeps the card compact even at narrow Settings widths.
-        // Each Grid row pins to the same baseline for visual alignment.
-        Grid(horizontalSpacing: 12, verticalSpacing: 10) {
-            GridRow {
-                chip(systemImage: "speaker.wave.2.fill",
-                     label: "Output",
-                     value: defaultOutputName,
-                     tint: .blue)
-
-                chip(systemImage: "mic.fill",
-                     label: "Input",
-                     value: defaultInputName,
-                     tint: .purple)
-            }
-            GridRow {
-                chip(systemImage: "slider.vertical.3",
-                     label: "EQ",
-                     value: appsWithActiveEQ == 0
-                         ? "No apps configured"
-                         : "\(appsWithActiveEQ) app\(appsWithActiveEQ == 1 ? "" : "s") active",
-                     tint: appsWithActiveEQ > 0 ? .green : .secondary)
-
-                chip(systemImage: loudnessIsOn ? "waveform.path.ecg" : "waveform",
-                     label: "Loudness",
-                     value: loudnessIsOn ? "On" : "Off",
-                     tint: loudnessIsOn ? .green : .secondary)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(DesignTokens.Colors.eqCardBackground)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(DesignTokens.Colors.eqCardBorder, lineWidth: 0.6)
+        SettingsSection("Overview") {
+            overviewRow("Output device", value: defaultOutputName)
+            SettingsRowDivider()
+            overviewRow("Input device", value: defaultInputName)
+            SettingsRowDivider()
+            overviewRow("Equalizer", value: appsWithActiveEQ == 0
+                        ? "No apps configured" : "\(appsWithActiveEQ) app\(appsWithActiveEQ == 1 ? "" : "s") active")
+            SettingsRowDivider()
+            overviewRow("Loudness", value: loudnessIsOn ? "Enabled" : "Disabled")
         }
     }
 
-    // MARK: - Chip builder
-
-    /// One info chip in the grid: tinted symbol + small label + bold value.
-    /// `Spacer(minLength: 0)` after the value lets the chip stretch to the
-    /// full grid cell width so two chips in a row are evenly balanced.
-    @ViewBuilder
-    private func chip(
-        systemImage: String,
-        label: String,
-        value: String,
-        tint: Color
-    ) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.system(size: 14, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(tint)
-                .frame(width: 18)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(label)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(DesignTokens.Colors.textTertiary)
-                    .textCase(.uppercase)
-                Text(value)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(DesignTokens.Colors.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-
-            Spacer(minLength: 0)
+    private func overviewRow(_ title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 24) {
+            Text(title).foregroundStyle(.primary)
+            Spacer(minLength: 12)
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(.primary.opacity(0.04))
-        }
+        .font(.body)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }

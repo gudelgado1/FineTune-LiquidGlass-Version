@@ -22,6 +22,36 @@ extension AudioDeviceID {
         readTransportType() == .virtual
     }
 
+    /// UIDs of an aggregate device's constituent hardware sub-devices, in the
+    /// aggregate's own channel order, or `nil` when this isn't an aggregate.
+    ///
+    /// Needed to *flatten* a user-created aggregate before wrapping it in
+    /// FineTune's private aggregate: CoreAudio refuses to nest an aggregate
+    /// inside another one — the wrapper ends up reporting 0 output channels —
+    /// so the sub-devices have to be expanded in directly.
+    nonisolated func aggregateSubDeviceUIDs() -> [String]? {
+        guard isAggregateDevice() else { return nil }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyFullSubDeviceList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(self, &address) else { return nil }
+
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(self, &address, 0, nil, &size) == noErr else { return nil }
+
+        // The property hands back a +1-retained CFArray of CFString UIDs;
+        // takeRetainedValue passes that ownership to ARC.
+        var unmanaged: Unmanaged<CFArray>?
+        let err = AudioObjectGetPropertyData(self, &address, 0, nil, &size, &unmanaged)
+        guard err == noErr, let uids = unmanaged?.takeRetainedValue() as? [String], !uids.isEmpty else {
+            return nil
+        }
+        return uids
+    }
+
     nonisolated func isHidden() -> Bool {
         (try? readBool(kAudioDevicePropertyIsHidden)) ?? false
     }
@@ -96,9 +126,16 @@ extension AudioDeviceID {
     /// Returns an appropriate SF Symbol name based on device name and transport type.
     /// Used as fallback when kAudioDevicePropertyIcon is not available.
     func suggestedIconSymbol() -> String {
-        let name = (try? readDeviceName()) ?? ""
-        let transport = readTransportType()
+        Self.iconSymbol(forName: (try? readDeviceName()) ?? "", transport: readTransportType())
+    }
 
+    /// Pure name/transport → SF Symbol mapping. Split out of
+    /// `suggestedIconSymbol()` so the cascade can be tested without a real
+    /// device, and so the icon picker can offer the same derived default.
+    ///
+    /// Ordered most-specific-first: "AirPods Pro" must be checked before
+    /// "AirPods", or every Pro would map to the plain glyph.
+    nonisolated static func iconSymbol(forName name: String, transport: TransportType) -> String {
         // AirPods variants
         if name.contains("AirPods Pro") { return "airpodspro" }
         if name.contains("AirPods Max") { return "airpodsmax" }

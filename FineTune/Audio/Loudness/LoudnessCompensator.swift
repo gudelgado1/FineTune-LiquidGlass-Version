@@ -12,7 +12,7 @@ import Accelerate
 ///
 /// Subclass of `BiquadProcessor` — inherits atomic setup swaps, stereo biquad processing,
 /// delay buffer management, and NaN safety. Follows the same pattern as `EQProcessor`.
-final class LoudnessCompensator: BiquadProcessor, @unchecked Sendable {
+nonisolated final class LoudnessCompensator: BiquadProcessor, @unchecked Sendable {
 
     // MARK: - Configuration
 
@@ -65,10 +65,7 @@ final class LoudnessCompensator: BiquadProcessor, @unchecked Sendable {
     /// Converts volume → estimated phon, skips recomputation if phon changed by less
     /// than 1.0 (coalesces rapid slider drags), bypasses processor when at reference level.
     ///
-    /// - Important: **Main thread only.** This method mutates `_eqSetup` and `_isEnabled`
-    ///   which the RT audio callback reads via `nonisolated(unsafe)`. Calling from any other
-    ///   thread creates a data race. Not annotated `@MainActor` because `BiquadProcessor`
-    ///   is not actor-isolated and test call sites run on arbitrary Swift Testing threads.
+    /// Control writer only. Immutable snapshots cross to the render thread.
     func updateForVolume(_ systemVolume: Float) {
         let phon = ISO226Contours.estimatedPhon(fromSystemVolume: systemVolume)
 
@@ -82,8 +79,7 @@ final class LoudnessCompensator: BiquadProcessor, @unchecked Sendable {
         // Bypass when all gains are negligible (near reference level)
         let allNegligible = gains.allSatisfy { abs($0) < 0.1 }
         if allNegligible {
-            setEnabled(false)
-            swapSetup(nil)
+            installSetup(nil, enabled: false)
             return
         }
 
@@ -91,8 +87,7 @@ final class LoudnessCompensator: BiquadProcessor, @unchecked Sendable {
         let newSetup = coefficients.withUnsafeBufferPointer { ptr in
             vDSP_biquad_CreateSetup(ptr.baseAddress!, vDSP_Length(Self.bandCount))
         }
-        swapSetup(newSetup)
-        setEnabled(true)
+        installSetup(newSetup, enabled: newSetup != nil)
     }
 
     // MARK: - Coefficient Computation

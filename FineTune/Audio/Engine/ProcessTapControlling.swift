@@ -1,10 +1,20 @@
+import AudioToolbox
+import Foundation
+
+/// The clock used to configure the current render pipeline. Read on the control
+/// thread; the wake worker receives this value, never a live tap controller.
+nonisolated struct TapRenderClock: Equatable, Sendable {
+    let aggregateDeviceID: AudioDeviceID
+    let sampleRate: Double
+}
+
 /// Abstraction over process tap controllers for testability.
 ///
-/// **Threading:** Intentionally NOT `@MainActor`. Concrete implementations straddle
-/// the main thread (property access from AudioEngine) and the CoreAudio HAL I/O thread
-/// (audio processing callbacks). Thread safety for mutable properties (`volume`, `isMuted`,
-/// `currentDeviceVolume`, `isDeviceMuted`) is achieved via `nonisolated(unsafe)` atomic
-/// field access on the concrete type, not actor isolation.
+/// Control-side interface. Native callbacks capture a nonisolated per-IO-proc
+/// TapRenderContext and never read controller state. Legacy synchronous activate
+/// methods remain as an adapter seam for tests; native activation is asynchronous.
+
+@MainActor
 protocol ProcessTapControlling: AnyObject {
     var app: AudioApp { get }
     var volume: Float { get set }
@@ -14,8 +24,13 @@ protocol ProcessTapControlling: AnyObject {
     var audioLevel: Float { get }
     var currentDeviceUID: String? { get }
     var currentDeviceUIDs: [String] { get }
+    var renderClock: TapRenderClock? { get }
 
+    func beginActivation(initialDSP: TapDSPConfiguration, completion: @escaping @MainActor (Result<Void, Error>) -> Void)
+    func activateAwaiting(initialDSP: TapDSPConfiguration) async throws
+    func invalidateAndWait() async throws
     func activate() throws
+    func activate(initialDSP: TapDSPConfiguration) throws
     func invalidate()
     func invalidateAsync() async
     func updateEQSettings(_ settings: EQSettings)
@@ -28,13 +43,11 @@ protocol ProcessTapControlling: AnyObject {
     func hasRecentAudioCallback(within seconds: Double) -> Bool
     func isHealthCheckEligible(minActiveSeconds: Double) -> Bool
 
-    /// True while the tap's underlying CoreAudio aggregate device is still alive
-    /// server-side. Returns false when `coreaudiod` has destroyed the aggregate
-    /// (restart under memory pressure, HAL reset, system overload) — the IO proc
-    /// is dead and will never fire again, so the tap must be recreated. This is a
-    /// *direct* resource-validity check, independent of callback timing, so it
-    /// catches taps that died before ever rendering a buffer.
-    var isResourceAlive: Bool { get }
+    /// Reads aggregate validity off control with a deadline. false means the
+    /// resource is definitively gone, true means no definitive death (including
+    /// transient HAL errors), nil means the read timed out or was not admitted.
+    /// Catches taps killed before their first callback too.
+    func checkResourceLiveness(timeout: TimeInterval) async -> Bool?
 
     /// Temporarily bypasses the per-callback DSP stack (EQ / AutoEQ / loudness)
     /// to shed CPU under memory/CPU pressure, reducing the chance of an IO-thread
@@ -47,6 +60,28 @@ protocol ProcessTapControlling: AnyObject {
 }
 
 extension ProcessTapControlling {
+    func beginActivation(initialDSP: TapDSPConfiguration, completion: @escaping @MainActor (Result<Void, Error>) -> Void) {
+        completion(Result { try activate(initialDSP: initialDSP) })
+    }
+    func activateAwaiting(initialDSP: TapDSPConfiguration) async throws {
+        try await withCheckedThrowingContinuation { continuation in beginActivation(initialDSP: initialDSP) { continuation.resume(with: $0) } }
+    }
+    func invalidateAndWait() async throws { await invalidateAsync() }
+
+    /// Compatibility path for adapters/mocks. Native taps build processors from
+    /// this state before registering/starting their IO proc.
+    func activate(initialDSP: TapDSPConfiguration) throws {
+        updateEQSettings(initialDSP.eq)
+        setAutoEQPreampEnabled(initialDSP.autoEQPreampEnabled)
+        updateAutoEQProfile(initialDSP.autoEQProfile)
+        updateLoudnessEqualization(initialDSP.loudnessEqualization)
+        updateLoudnessCompensation(volume: initialDSP.loudnessVolume, enabled: initialDSP.loudnessCompensationEnabled)
+        setDSPBypass(initialDSP.bypass)
+        try activate()
+    }
+
+    var renderClock: TapRenderClock? { nil }
+
     /// Convenience: defaults sourceDeviceDead to false.
     func switchDevice(to newDeviceUID: String, preferredTapSourceDeviceUID: String?) async throws {
         try await switchDevice(to: newDeviceUID, preferredTapSourceDeviceUID: preferredTapSourceDeviceUID, sourceDeviceDead: false)
@@ -70,7 +105,7 @@ extension ProcessTapControlling {
     }
 
     /// Mocks are assumed alive unless they override this.
-    var isResourceAlive: Bool { true }
+    func checkResourceLiveness(timeout: TimeInterval) async -> Bool? { true }
 
     /// Default no-op for mocks that don't override.
     func setDSPBypass(_ bypass: Bool) {}

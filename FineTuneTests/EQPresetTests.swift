@@ -6,6 +6,34 @@ import Testing
 import Foundation
 @testable import FineTune
 
+@Suite("EQ preset application")
+struct EQPresetApplicationTests {
+    @Test("Built-in curves preserve the app's enabled state", arguments: EQPreset.allCases, [true, false])
+    func builtInCurve(preset: EQPreset, enabled: Bool) {
+        let current = EQSettings(bandGains: Array(repeating: 2, count: 10), isEnabled: enabled)
+        let result = current.applyingCurve(from: preset.settings)
+        #expect(result.isEnabled == enabled)
+        #expect(result.bandGains == preset.settings.bandGains)
+        #expect(current.bandGains == Array(repeating: 2, count: 10))
+    }
+
+    @Test("Saved preset enable flags do not override per-app state", arguments: [true, false], [true, false])
+    func savedCurve(enabled: Bool, savedEnabled: Bool) {
+        let current = EQSettings(isEnabled: enabled)
+        let saved = EQSettings(bandGains: [1, 2, 3, 4, 5, 0, -1, -2, -3, -4], isEnabled: savedEnabled)
+        let result = current.applyingCurve(from: saved)
+        #expect(result.isEnabled == enabled)
+        #expect(result.bandGains == saved.bandGains)
+    }
+
+    @Test("Flat stays visibly enabled while bypassing unnecessary DSP")
+    func flatCurve() {
+        let result = EQSettings(isEnabled: true).applyingCurve(from: EQPreset.flat.settings)
+        #expect(result.isEnabled)
+        #expect(!result.hasAudibleEffect)
+    }
+}
+
 // MARK: - EQPreset — Catalog Completeness
 
 @Suite("EQPreset — Catalog")

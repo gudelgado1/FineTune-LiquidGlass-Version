@@ -213,7 +213,10 @@ final class MediaKeyMonitor {
 
     /// Applies a decoded `MediaKeyEvent` to the default output device, or—for the
     /// F7/F8/F9 transport keys—forwards it to the marked default media app.
-    func handle(_ event: MediaKeyEvent) {
+    /// Plays the system volume-feedback pop on volume key steps. Wired by FineTuneApp after init.
+    var feedbackPlayer: VolumeFeedbackPlayer?
+
+    func handle(_ event: MediaKeyEvent, shiftHeld: Bool = false, optionHeld: Bool = false) {
         if event.isTransport {
             handleTransport(event)
             return
@@ -235,7 +238,15 @@ final class MediaKeyMonitor {
             currentVolume: volumeMonitor.volumes[deviceID] ?? 0,
             currentMute: volumeMonitor.muteStates[deviceID] ?? false,
             setVolume: { id, vol in volumeMonitor.setVolume(for: id, to: vol) },
-            setMute:   { id, mute in volumeMonitor.setMute(for: id, to: mute) }
+            setMute:   { id, mute in volumeMonitor.setMute(for: id, to: mute) },
+            readCurrentVolume: { volumeMonitor.volumes[deviceID] ?? 0 },
+            playFeedback: { gain in
+                self.feedbackPlayer?.requestFeedback(
+                    gain: gain,
+                    shiftHeld: shiftHeld,
+                    optionHeld: optionHeld
+                )
+            }
         )
     }
 
@@ -264,8 +275,8 @@ final class MediaKeyMonitor {
     /// Volume-up from a muted state simply unmutes and steps from the
     /// captured `currentVolume` — we no longer try to restore a saved
     /// pre-mute level (that produced surprising jumps on AutoDDC monitors).
-    /// Volume-down no longer auto-mutes when reaching zero; volume at 0
-    /// with no mute flag is plain silent, and the next F12 cleanly steps up.
+    /// Volume-down does not directly auto-mute at zero. The hardware backend
+    /// mutes at zero to guarantee silence; the next F12 unmutes and steps up.
     func handleCore(
         event: MediaKeyEvent,
         deviceID: AudioDeviceID,
@@ -274,7 +285,9 @@ final class MediaKeyMonitor {
         currentVolume: Float,
         currentMute: Bool,
         setVolume: (AudioDeviceID, Float) -> Void,
-        setMute: (AudioDeviceID, Bool) -> Void
+        setMute: (AudioDeviceID, Bool) -> Void,
+        readCurrentVolume: (() -> Float)? = nil,
+        playFeedback: (Float) -> Void = { _ in }
     ) {
         let shouldShowHUD = !popupVisibility.isVisible
         let sliderDelta = settingsManager.appSettings.volumeHotkeyStep.sliderDelta
@@ -288,8 +301,7 @@ final class MediaKeyMonitor {
             }
 
             // F12 always *steps up* the visible volume. If we happen to be
-            // muted (only possible now via explicit F10 / popup mute — the
-            // auto-mute-at-zero behavior has been removed from volumeDown),
+            // muted (explicitly or after the hardware backend reached zero),
             // unmute first; the step then advances from the current visible
             // level. We do NOT restore the pre-mute saved volume — that
             // surprised users on AutoDDC monitors where the saved value
@@ -303,6 +315,7 @@ final class MediaKeyMonitor {
             let nextSlider = min(1.0, currentSlider + sliderDelta)
             let newVolume = VolumeMapping.systemGain(forSliderFraction: nextSlider, tier: tier)
             setVolume(deviceID, newVolume)
+            playFeedback(VolumeFeedback.gain(tier: tier, sliderFraction: nextSlider))
             if shouldShowHUD {
                 hudController.show(sliderFraction: nextSlider, mute: false, deviceName: deviceName)
             }
@@ -319,17 +332,19 @@ final class MediaKeyMonitor {
 
             // If we're muted and stepping down would land on an audible value,
             // unmute first (so the user's "step down" works after a previous
-            // F10 mute). We deliberately do NOT auto-mute when nextSlider hits
-            // zero — the previous behavior trapped users on DDC devices: F11
-            // → 0 set the mute flag, F12 then restored the stale `savedVolume`
-            // (e.g. 71%) instead of stepping back to 6.25%. Volume at 0 with
-            // no mute flag is plain "silent" — the next F12 cleanly steps up.
+            // F10 mute). The handler does not directly auto-mute at zero;
+            // DeviceVolumeMonitor handles that only for the hardware backend,
+            // avoiding the old DDC savedVolume restore trap.
             if currentMute && !willBeSilent {
                 setMute(deviceID, false)
             }
             setVolume(deviceID, newVolume)
+            playFeedback(VolumeFeedback.gain(tier: tier, sliderFraction: nextSlider))
             if shouldShowHUD {
-                hudController.show(sliderFraction: nextSlider, mute: false, deviceName: deviceName)
+                // A muted device stepping down to 0 STAYS muted (no unmute above)
+                // — the HUD must say so instead of flashing an unmuted speaker.
+                let staysMuted = currentMute && willBeSilent
+                hudController.show(sliderFraction: nextSlider, mute: staysMuted, deviceName: deviceName)
             }
             iconCoordinator?.flashDevice()
 
@@ -337,7 +352,12 @@ final class MediaKeyMonitor {
             let newMute = !currentMute
             setMute(deviceID, newMute)
             if shouldShowHUD {
-                hudController.show(sliderFraction: currentSlider, mute: newMute, deviceName: deviceName)
+                // Software mute publishes zero; unmute restores the saved gain
+                // synchronously. Read the resulting cached scalar, not the zero
+                // captured before setMute. This performs no extra HAL query.
+                let visibleVolume = newMute ? currentVolume : (readCurrentVolume?() ?? currentVolume)
+                let visibleSlider = VolumeMapping.sliderFraction(forSystemGain: visibleVolume, tier: tier)
+                hudController.show(sliderFraction: visibleSlider, mute: newMute, deviceName: deviceName)
             }
             iconCoordinator?.flashDevice()
 
@@ -440,7 +460,12 @@ final class MediaKeyMonitor {
         }
 
         hudController.swallowObserved()
-        handle(mediaEvent)
+        // Shift inverts the system "play feedback" preference, matching macOS.
+        handle(
+            mediaEvent,
+            shiftHeld: cgEvent.flags.contains(.maskShift),
+            optionHeld: cgEvent.flags.contains(.maskAlternate)
+        )
         return true
     }
 }

@@ -6,6 +6,9 @@ struct AudioTab: View {
     @Bindable var settings: SettingsManager
     @Bindable var audioEngine: AudioEngine
     @Bindable var deviceVolumeMonitor: DeviceVolumeMonitor
+    /// Owned here (not injected): the reset flow is only reachable from this
+    /// tab, and its state is transient — nothing else observes it.
+    @State private var coreAudioReset = CoreAudioResetService()
 
     /// Memoized sorted output devices for the system-sounds picker.
     @State private var sortedOutputDevices: [AudioDevice] = []
@@ -23,21 +26,17 @@ struct AudioTab: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                AudioOverviewCard(
-                    settings: settings,
-                    audioEngine: audioEngine,
-                    deviceVolumeMonitor: deviceVolumeMonitor
-                )
-                volumeSection
-                devicesSection
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 24) {
+            AudioOverviewCard(
+                settings: settings,
+                audioEngine: audioEngine,
+                deviceVolumeMonitor: deviceVolumeMonitor
+            )
+            volumeSection
+            devicesSection
+            troubleshootingSection
         }
-        .scrollIndicators(.never)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { updateSortedDevices() }
         .onChange(of: audioEngine.outputDevices) { _, _ in updateSortedDevices() }
         .onChange(of: settings.appSettings.lockInputDevice) { oldValue, newValue in
@@ -134,6 +133,18 @@ struct AudioTab: View {
                     deviceVolumeMonitor.refreshAlertVolume()
                 }
             }
+        }
+    }
+
+    // MARK: - Troubleshooting
+
+    private var troubleshootingSection: some View {
+        SettingsSection("Troubleshooting") {
+            // Ordered least- to most-invasive: rebuilding FineTune's own taps
+            // costs nothing system-wide, so it should be the first thing tried.
+            CaptureRebuildRow(audioEngine: audioEngine)
+            SettingsRowDivider()
+            CoreAudioResetRow(service: coreAudioReset, audioEngine: audioEngine)
         }
     }
 

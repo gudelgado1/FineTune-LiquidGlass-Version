@@ -66,6 +66,10 @@ extension AudioTaskID {
     /// cheap check detects, so we rebuild them after a settle delay.
     static let wakeRebuild = AudioTaskID("audio.wakeRebuild")
 
+    /// Second post-wake sweep for taps whose target device re-enumerated too
+    /// slowly (Bluetooth, HDMI/DP) for the first pass's device-alive guard.
+    static let wakeRebuildSecondPass = AudioTaskID("audio.wakeRebuildSecondPass")
+
     /// Bluetooth confirmation timeout (one per device MAC).
     static func bluetoothConfirm(mac: String) -> AudioTaskID {
         AudioTaskID("audio.bluetoothConfirm.\(mac)")

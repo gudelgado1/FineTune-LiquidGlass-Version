@@ -34,7 +34,7 @@ enum CrossfadeError: LocalizedError {
 /// Picking the right profile avoids two failure modes:
 ///   * Crossfade too short → audible click or partial silence on slow devices
 ///   * Crossfade too long → switches feel sluggish on fast devices
-struct CrossfadeProfile: Sendable {
+nonisolated struct CrossfadeProfile: Sendable {
     /// Equal-power fade duration in seconds. Wall-clock time the secondary
     /// callback takes to ramp from 0→1 while primary ramps 1→0.
     let crossfadeDuration: TimeInterval
@@ -105,13 +105,13 @@ enum CrossfadeConfig {
     /// User override via UserDefaults — when present, overrides ALL profile
     /// durations. Useful for QA/regression testing.
     static var duration: TimeInterval {
-        let custom = UserDefaults.standard.double(forKey: "FineTuneCrossfadeDuration")
+        let custom = AppDataLocations.preferences.double(forKey: "FineTuneCrossfadeDuration")
         return custom > 0 ? custom : defaultDuration
     }
 
     /// Duration for a given profile, honoring the UserDefaults override.
     static func duration(for profile: CrossfadeProfile) -> TimeInterval {
-        let custom = UserDefaults.standard.double(forKey: "FineTuneCrossfadeDuration")
+        let custom = AppDataLocations.preferences.double(forKey: "FineTuneCrossfadeDuration")
         return custom > 0 ? custom : profile.crossfadeDuration
     }
 

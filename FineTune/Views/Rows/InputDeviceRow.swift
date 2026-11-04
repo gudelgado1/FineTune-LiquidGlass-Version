@@ -5,6 +5,7 @@ import SwiftUI
 /// Used in the Input Devices section
 struct InputDeviceRow: View {
     let device: AudioDevice
+    let iconOverride: String?
     let isDefault: Bool
     let volume: Float
     let isMuted: Bool
@@ -12,6 +13,7 @@ struct InputDeviceRow: View {
     let onVolumeChange: (Float) -> Void
     let onMuteToggle: () -> Void
     let isFocused: Bool
+    let textEntry: PopupTextEntryCoordinator?
 
     @State private var sliderValue: Double
     @State private var isEditing = false
@@ -35,15 +37,18 @@ struct InputDeviceRow: View {
 
     init(
         device: AudioDevice,
+        iconOverride: String? = nil,
         isDefault: Bool,
         volume: Float,
         isMuted: Bool,
         onSetDefault: @escaping () -> Void,
         onVolumeChange: @escaping (Float) -> Void,
         onMuteToggle: @escaping () -> Void,
-        isFocused: Bool = false
+        isFocused: Bool = false,
+        textEntry: PopupTextEntryCoordinator? = nil
     ) {
         self.device = device
+        self.iconOverride = iconOverride
         self.isDefault = isDefault
         self.volume = volume
         self.isMuted = isMuted
@@ -51,6 +56,7 @@ struct InputDeviceRow: View {
         self.onVolumeChange = onVolumeChange
         self.onMuteToggle = onMuteToggle
         self.isFocused = isFocused
+        self.textEntry = textEntry
         self._sliderValue = State(initialValue: Double(volume))
     }
 
@@ -77,7 +83,8 @@ struct InputDeviceRow: View {
 
     private var deviceHeader: some View {
         HStack(spacing: DesignTokens.Spacing.sm) {
-            DeviceBadge(icon: device.icon, isSelected: isDefault, fallbackSymbol: "mic")
+            DeviceBadge(icon: device.icon, isSelected: isDefault, fallbackSymbol: "mic", overrideSymbol: iconOverride)
+                .padding(.leading, DesignTokens.Dimensions.badgeRowLeadingInset)
 
             // Device name
             Text(device.name)
@@ -108,6 +115,7 @@ struct InputDeviceRow: View {
                     isEditing = editing
                 }
             )
+            .frame(width: DesignTokens.Dimensions.sliderWidth)
             .opacity(showMutedIcon ? 0.5 : 1.0)
             .onChange(of: sliderValue) { _, newValue in
                 // Skip write-back when syncing from device (breaks USB DAC quantization spiral)
@@ -123,8 +131,8 @@ struct InputDeviceRow: View {
             }
             .scrollWheelStep($sliderValue, in: 0.0...1.0)
 
-            // Editable volume percentage — collapses to zero width when hidden,
-            // expands + fades in on row hover/drag/edit. No layout gap at rest.
+            // Editable volume percentage — hidden at rest,
+            // fades in on row hover/drag/edit inside its fixed column.
             EditablePercentage(
                 percentage: Binding(
                     get: { Int(round(sliderValue * 100)) },
@@ -133,12 +141,15 @@ struct InputDeviceRow: View {
                 range: 0...100,
                 onEditingChanged: { editing in
                     withAnimation(DesignTokens.Animation.hover) { isPercentageEditing = editing }
-                }
+                },
+                isRowFocused: isFocused,
+                textEntry: textEntry
             )
             .opacity(isRowHovered || isEditing || isPercentageEditing ? 1 : 0)
-            .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
-            .clipped()
+            .frame(width: DesignTokens.Dimensions.percentageWidth)
             .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
+
+            Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)
         }
         .frame(height: DesignTokens.Dimensions.rowContentHeight)
         .onHover { hovering in

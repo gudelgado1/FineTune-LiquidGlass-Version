@@ -19,6 +19,8 @@ import SwiftUI
 /// See: IOAudioLevelControl.h, MCCS VCP 0x62, empirical ScalarToDecibels measurement.
 struct DeviceRow: View {
     let device: AudioDevice
+    /// User's icon override for this device, if any.
+    var iconOverride: String? = nil
     let isDefault: Bool
     let volume: Float
     let isMuted: Bool
@@ -42,6 +44,8 @@ struct DeviceRow: View {
     let autoEQPreampEnabled: Bool
     let onAutoEQPreampToggle: (() -> Void)?
     let isFocused: Bool
+    /// Popup-owned keyboard percentage entry.
+    var textEntry: PopupTextEntryCoordinator? = nil
     /// Whether the inline AutoEQ inspector is open under this row. Mirrors the
     /// `isEQExpanded` pattern of `AppRow` so device AutoEQ expansion uses the
     /// same `expandedRowID` state as per-app EQ in `MenuBarPopupView`.
@@ -73,6 +77,7 @@ struct DeviceRow: View {
 
     init(
         device: AudioDevice,
+        iconOverride: String? = nil,
         isDefault: Bool,
         volume: Float,
         isMuted: Bool,
@@ -93,10 +98,12 @@ struct DeviceRow: View {
         autoEQPreampEnabled: Bool = true,
         onAutoEQPreampToggle: (() -> Void)? = nil,
         isFocused: Bool = false,
+        textEntry: PopupTextEntryCoordinator? = nil,
         isAutoEQExpanded: Bool = false,
         onAutoEQToggleExpansion: @escaping () -> Void = {}
     ) {
         self.device = device
+        self.iconOverride = iconOverride
         self.isDefault = isDefault
         self.volume = volume
         self.isMuted = isMuted
@@ -117,6 +124,7 @@ struct DeviceRow: View {
         self.autoEQPreampEnabled = autoEQPreampEnabled
         self.onAutoEQPreampToggle = onAutoEQPreampToggle
         self.isFocused = isFocused
+        self.textEntry = textEntry
         self.isAutoEQExpanded = isAutoEQExpanded
         self.onAutoEQToggleExpansion = onAutoEQToggleExpansion
         self._sliderValue = State(initialValue: Self.volumeToSlider(volume, backend: volumeBackend))
@@ -182,7 +190,8 @@ struct DeviceRow: View {
             // Selection is now signalled by accent-colored gradient on the
             // badge plus bold device name; the row-level gesture in `body`
             // handles tap-to-set-default.
-            DeviceBadge(icon: device.icon, isSelected: isDefault)
+            DeviceBadge(icon: device.icon, isSelected: isDefault, overrideSymbol: iconOverride)
+                .padding(.leading, DesignTokens.Dimensions.badgeRowLeadingInset)
 
             // Device name + optional AutoEQ profile subtitle.
             // For AutoEQ-capable devices the name area also acts as the
@@ -203,20 +212,20 @@ struct DeviceRow: View {
                             // Rotates 90° when open — same motion vocabulary
                             // as the EQ button and the DeviceEditRow info button.
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(
                                     isAutoEQExpanded
                                         ? DesignTokens.Colors.accentPrimary
                                         : DesignTokens.Colors.textTertiary
                                 )
                                 .rotationEffect(.degrees(isAutoEQExpanded ? 90 : 0))
-                                .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isAutoEQExpanded)
+                                .animation(DesignTokens.Animation.disclosure, value: isAutoEQExpanded)
                         }
                     }
 
                     if let subtitle = Self.autoEQSubtitle(profileName: autoEQProfileName, isEnabled: autoEQEnabled) {
                         Text(subtitle)
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(DesignTokens.Colors.textTertiary)
                             .lineLimit(1)
                     }
@@ -232,7 +241,7 @@ struct DeviceRow: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 if autoEQProfileManager != nil {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                    withAnimation(DesignTokens.Animation.disclosure) {
                         onAutoEQToggleExpansion()
                     }
                 } else if !isDefault {
@@ -264,6 +273,7 @@ struct DeviceRow: View {
                     isEditing = editing
                 }
             )
+            .frame(width: DesignTokens.Dimensions.sliderWidth)
             .opacity(showMutedIcon ? 0.5 : 1.0)
             .onChange(of: sliderValue) { _, newValue in
                 // Skip write-back when syncing from device (breaks USB DAC quantization spiral)
@@ -283,8 +293,8 @@ struct DeviceRow: View {
             }
             .scrollWheelStep($sliderValue, in: 0.0...1.0)
 
-            // Editable volume percentage — collapses to zero width when hidden,
-            // expands + fades in on row hover/drag/edit. No layout gap at rest.
+            // Editable volume percentage — hidden at rest,
+            // fades in on row hover/drag/edit inside its fixed column.
             EditablePercentage(
                 percentage: Binding(
                     get: { Int(round(sliderValue * 100)) },
@@ -293,12 +303,15 @@ struct DeviceRow: View {
                 range: 0...100,
                 onEditingChanged: { editing in
                     withAnimation(DesignTokens.Animation.hover) { isPercentageEditing = editing }
-                }
+                },
+                isRowFocused: isFocused,
+                textEntry: textEntry
             )
             .opacity(isRowHovered || isEditing || isPercentageEditing ? 1 : 0)
-            .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
-            .clipped()
+            .frame(width: DesignTokens.Dimensions.percentageWidth)
             .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
+
+            Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)
         }
         .frame(height: DesignTokens.Dimensions.rowContentHeight)
         .onHover { hovering in

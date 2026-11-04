@@ -2,7 +2,7 @@ import Foundation
 
 /// Smooths gain changes using asymmetric attack/release time constants.
 /// Ticks once per analysis hop. RT-safe — no allocations in `process`.
-final class GainSmoother: @unchecked Sendable {
+nonisolated final class GainSmoother: @unchecked Sendable {
     private var settings: LoudnessEqualizerSettings
     private var attackCoeff: Float
     private var releaseCoeff: Float

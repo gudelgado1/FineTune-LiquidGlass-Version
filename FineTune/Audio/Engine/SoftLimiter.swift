@@ -12,7 +12,7 @@ import Accelerate
 /// - Below 0.95: passes through unchanged (transparent)
 /// - Above 0.95: smooth compression approaching 1.0 asymptotically
 /// - Never exceeds ±1.0 for any finite input
-enum SoftLimiter {
+nonisolated enum SoftLimiter {
 
     /// Threshold where limiting begins (below this, audio passes through)
     static let threshold: Float = 0.95

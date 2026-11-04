@@ -53,9 +53,15 @@ extension MenuBarPopupView {
                     }
                 }
             } else if showingInputDevices {
+                SectionHeader(title: "Input")
+                if sortedInputDevices.isEmpty {
+                    Text("No input devices available")
+                        .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
+                }
                 ForEach(sortedInputDevices) { device in
                     InputDeviceRow(
                         device: device,
+                        iconOverride: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid),
                         isDefault: device.id == deviceVolumeMonitor.defaultInputDeviceID,
                         volume: deviceVolumeMonitor.inputVolumes[device.id] ?? 1.0,
                         isMuted: deviceVolumeMonitor.inputMuteStates[device.id] ?? false,
@@ -69,84 +75,150 @@ extension MenuBarPopupView {
                             let currentMute = deviceVolumeMonitor.inputMuteStates[device.id] ?? false
                             deviceVolumeMonitor.setInputMute(for: device.id, to: !currentMute)
                         },
-                        isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid)
+                        isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid),
+                        textEntry: textEntry
                     )
                     .id(PopupKeyboardNavModel.RowID.device(uid: device.uid))
                 }
             } else {
-                ForEach(sortedDevices) { device in
-                    let selection = audioEngine.getAutoEQSelection(for: device.uid)
-                    let profileName: String? = {
-                        guard let sel = selection else { return nil }
-                        return audioEngine.autoEQProfileManager.profile(for: sel.profileID)?.name
-                            ?? audioEngine.autoEQProfileManager.catalogEntry(for: sel.profileID)?.name
-                    }()
-
-                    DeviceRow(
-                        device: device,
-                        isDefault: device.id == deviceVolumeMonitor.defaultDeviceID,
-                        volume: deviceVolumeMonitor.volumes[device.id] ?? 1.0,
-                        isMuted: deviceVolumeMonitor.muteStates[device.id] ?? false,
-                        volumeBackend: audioEngine.outputVolumeBackend(for: device.id),
-                        onSetDefault: {
-                            audioEngine.setDefaultOutputDevice(device.id)
-                        },
-                        onVolumeChange: { volume in
-                            deviceVolumeMonitor.setVolume(for: device.id, to: volume)
-                        },
-                        onMuteToggle: {
-                            let currentMute = deviceVolumeMonitor.muteStates[device.id] ?? false
-                            deviceVolumeMonitor.setMute(for: device.id, to: !currentMute)
-                        },
-                        autoEQProfileName: profileName,
-                        autoEQEnabled: selection?.isEnabled ?? false,
-                        onAutoEQToggle: { enabled in
-                            audioEngine.setAutoEQEnabled(for: device.uid, enabled: enabled)
-                        },
-                        autoEQProfileManager: audioEngine.autoEQProfileManager,
-                        autoEQSelection: selection,
-                        autoEQFavoriteIDs: audioEngine.settingsManager.favoriteAutoEQProfileIDs,
-                        onAutoEQSelect: { profile in
-                            audioEngine.setAutoEQProfile(for: device.uid, profileID: profile?.id)
-                        },
-                        onAutoEQImport: {
-                            importAutoEQFile(for: device.uid)
-                        },
-                        onAutoEQToggleFavorite: { id in
-                            if audioEngine.settingsManager.isAutoEQFavorite(id: id) {
-                                audioEngine.settingsManager.unfavoriteAutoEQProfile(id: id)
-                            } else {
-                                audioEngine.settingsManager.favoriteAutoEQProfile(id: id)
-                            }
-                        },
-                        autoEQImportError: autoEQImportError,
-                        autoEQPreampEnabled: audioEngine.autoEQPreampEnabled,
-                        onAutoEQPreampToggle: {
-                            audioEngine.setAutoEQPreampEnabled(!audioEngine.autoEQPreampEnabled)
-                        },
-                        isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid),
-                        // Reuse the same `expandedRowID` slot used by per-app EQ.
-                        // Device UIDs and app PIDs are disjoint string spaces so
-                        // there's no risk of collision — only one inspector is
-                        // open at a time, which matches the popup's intent.
-                        isAutoEQExpanded: expandedRowID == device.uid,
-                        onAutoEQToggleExpansion: {
-                            if expandedRowID == device.uid {
-                                expandedRowID = nil
-                            } else {
-                                expandedRowID = device.uid
-                            }
-                        }
-                    )
-                    .id(PopupKeyboardNavModel.RowID.device(uid: device.uid))
-                }
+                compactOutputsContent
             }
         }
     }
 
-    /// Sound-effects (system alert volume) row. Rendered by `mainContent` between
-    /// the devices and apps sections — at that level (not inside `devicesContent`)
-    /// so the dividers above and below it are symmetric section-style dividers.
+    var outputLayout: PopupOutputLayout {
+        PopupOutputLayout(devices: sortedDevices, defaultUID: deviceVolumeMonitor.defaultDeviceUID)
+    }
+
+    var visibleOutputDevices: [AudioDevice] {
+        outputLayout.visibleDevices(showingAlternatives: showingOtherOutputs)
+    }
+
+    @ViewBuilder
+    var compactOutputsContent: some View {
+        let layout = outputLayout
+        VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
+            HStack {
+                SectionHeader(title: layout.active == nil ? "Choose an Output" : "Current Output")
+                Spacer()
+                if layout.active != nil && !layout.alternatives.isEmpty {
+                    Button {
+                        setShowingOtherOutputs(!showingOtherOutputs)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(showingOtherOutputs ? "Hide Other Outputs" : "Other Outputs (\(layout.alternatives.count))")
+                            Image(systemName: "chevron.down")
+                                .rotationEffect(.degrees(showingOtherOutputs ? 180 : 0))
+                                .animation(DesignTokens.Animation.disclosure, value: showingOtherOutputs)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                    .help("Show or hide other outputs (⇧⌘O)")
+                    .accessibilityValue(showingOtherOutputs ? "Expanded" : "Collapsed")
+                    .accessibilityIdentifier("output.alternatives.toggle")
+                }
+            }
+            if visibleOutputDevices.isEmpty {
+                Text("No output devices available")
+                    .font(.callout).foregroundStyle(.secondary).padding(.vertical, 8)
+            } else {
+                ForEach(visibleOutputDevices) { device in
+                    outputDeviceRow(device)
+                        .transition(.opacity)
+                }
+            }
+        }
+        .accessibilityIdentifier("output.current.section")
+    }
+
+    func outputDeviceRow(_ device: AudioDevice) -> some View {
+        let selection = audioEngine.getAutoEQSelection(for: device.uid)
+        let profileName: String? = {
+            guard let sel = selection else { return nil }
+            return audioEngine.autoEQProfileManager.profile(for: sel.profileID)?.name
+                ?? audioEngine.autoEQProfileManager.catalogEntry(for: sel.profileID)?.name
+        }()
+
+        return DeviceRow(
+            device: device,
+            iconOverride: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid),
+            isDefault: device.id == deviceVolumeMonitor.defaultDeviceID,
+            volume: deviceVolumeMonitor.volumes[device.id] ?? 1.0,
+            isMuted: deviceVolumeMonitor.muteStates[device.id] ?? false,
+            volumeBackend: audioEngine.outputVolumeBackend(for: device.id),
+            onSetDefault: {
+                audioEngine.setDefaultOutputDevice(device.id)
+            },
+            onVolumeChange: { volume in
+                deviceVolumeMonitor.setVolume(for: device.id, to: volume)
+            },
+            onMuteToggle: {
+                let currentMute = deviceVolumeMonitor.muteStates[device.id] ?? false
+                deviceVolumeMonitor.setMute(for: device.id, to: !currentMute)
+            },
+            autoEQProfileName: profileName,
+            autoEQEnabled: selection?.isEnabled ?? false,
+            onAutoEQToggle: { enabled in
+                audioEngine.setAutoEQEnabled(for: device.uid, enabled: enabled)
+            },
+            autoEQProfileManager: audioEngine.autoEQProfileManager,
+            autoEQSelection: selection,
+            autoEQFavoriteIDs: audioEngine.settingsManager.favoriteAutoEQProfileIDs,
+            onAutoEQSelect: { profile in
+                audioEngine.setAutoEQProfile(for: device.uid, profileID: profile?.id)
+            },
+            onAutoEQImport: {
+                importAutoEQFile(for: device.uid)
+            },
+            onAutoEQToggleFavorite: { id in
+                if audioEngine.settingsManager.isAutoEQFavorite(id: id) {
+                    audioEngine.settingsManager.unfavoriteAutoEQProfile(id: id)
+                } else {
+                    audioEngine.settingsManager.favoriteAutoEQProfile(id: id)
+                }
+            },
+            autoEQImportError: autoEQImportError,
+            autoEQPreampEnabled: audioEngine.autoEQPreampEnabled,
+            onAutoEQPreampToggle: {
+                audioEngine.setAutoEQPreampEnabled(!audioEngine.autoEQPreampEnabled)
+            },
+            isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid),
+            textEntry: textEntry,
+            // Reuse the same `expandedRowID` slot used by per-app EQ.
+            // Device UIDs and app PIDs are disjoint string spaces so
+            // there's no risk of collision — only one inspector is
+            // open at a time, which matches the popup's intent.
+            isAutoEQExpanded: expandedRowID == device.uid,
+            onAutoEQToggleExpansion: {
+                if expandedRowID == device.uid {
+                    expandedRowID = nil
+                } else {
+                    expandedRowID = device.uid
+                }
+            }
+        )
+        .id(PopupKeyboardNavModel.RowID.device(uid: device.uid))
+    }
+
+    func setShowingOtherOutputs(_ show: Bool) {
+        // Animate the disclosure itself, not just its chevron. Keep navigation
+        // synchronous so removed rows cannot retain keyboard selection during
+        // the visual collapse. The shared token also honors Reduce Motion.
+        withAnimation(DesignTokens.Animation.disclosure) {
+            if !show, let expandedRowID,
+               outputLayout.alternatives.contains(where: { $0.uid == expandedRowID }) {
+                inlineEditor.dismissCurrent()
+                self.expandedRowID = nil
+            }
+            showingOtherOutputs = show
+        }
+        syncNavOrder()
+    }
+
+    /// Sound-effects row follows the apps on the compact home screen, keeping
+    /// the primary output and per-app controls adjacent.
     /// Output tab only, and hidden in edit mode, is enforced by the caller.
     /// Sentinel `expandedRowID` value for the Sound Effects selector — disjoint from
     /// device UIDs and app persistence IDs, so it shares the single-open-row slot
@@ -163,7 +235,7 @@ extension MenuBarPopupView {
             defaultDeviceUID: deviceVolumeMonitor.defaultDeviceUID,
             isExpanded: expandedRowID == Self.systemSoundsRowID,
             onToggleExpand: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                withAnimation(DesignTokens.Animation.disclosure) {
                     expandedRowID = (expandedRowID == Self.systemSoundsRowID) ? nil : Self.systemSoundsRowID
                 }
             },
@@ -171,11 +243,11 @@ extension MenuBarPopupView {
                 if let device = sortedDevices.first(where: { $0.uid == uid }) {
                     deviceVolumeMonitor.setSystemDeviceExplicit(device.id)
                 }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { expandedRowID = nil }
+                withAnimation(DesignTokens.Animation.disclosure) { expandedRowID = nil }
             },
             onSelectFollowDefault: {
                 deviceVolumeMonitor.setSystemFollowDefault()
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { expandedRowID = nil }
+                withAnimation(DesignTokens.Animation.disclosure) { expandedRowID = nil }
             }
         )
     }
@@ -204,7 +276,7 @@ extension MenuBarPopupView {
             onReorder: { newIndex in
                 guard let fromIndex = editableDeviceOrder.firstIndex(where: { $0.uid == device.uid }) else { return }
                 guard newIndex != fromIndex, newIndex >= 0, newIndex < editableDeviceOrder.count else { return }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                withAnimation(DesignTokens.Animation.disclosure) {
                     editableDeviceOrder.move(
                         fromOffsets: IndexSet(integer: fromIndex),
                         toOffset: newIndex > fromIndex ? newIndex + 1 : newIndex
@@ -215,7 +287,7 @@ extension MenuBarPopupView {
                 // Input devices have no per-device detail to show —
                 // only output devices carry a volume-tier override.
                 guard !showingInputDevices else { return }
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                withAnimation(DesignTokens.Animation.disclosure) {
                     expandedDeviceUID = (expandedDeviceUID == device.uid) ? nil : device.uid
                 }
             },
@@ -225,6 +297,10 @@ extension MenuBarPopupView {
                 } else {
                     audioEngine.settingsManager.toggleOutputDeviceHidden(uid: device.uid)
                 }
+            },
+            iconOverride: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid),
+            onIconOverrideChange: { symbol in
+                audioEngine.settingsManager.setDeviceIconOverride(for: device.uid, to: symbol)
             },
             expandedContent: {
                 // Only render when actually expanded. Input devices skip
@@ -248,14 +324,14 @@ extension MenuBarPopupView {
             Text(device.name)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .glassChip(in: RoundedRectangle(cornerRadius: 6))
+                .glassChip(in: RoundedRectangle(cornerRadius: DesignTokens.Dimensions.buttonRadius))
         }
         .dropDestination(for: String.self) { droppedUIDs, _ in
             guard let droppedUID = droppedUIDs.first,
                   let fromIndex = editableDeviceOrder.firstIndex(where: { $0.uid == droppedUID }),
                   let toIndex = editableDeviceOrder.firstIndex(where: { $0.uid == device.uid }),
                   fromIndex != toIndex else { return false }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 editableDeviceOrder.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: toIndex > fromIndex ? toIndex + 1 : toIndex)
             }
             return true
@@ -264,24 +340,15 @@ extension MenuBarPopupView {
 
     @ViewBuilder
     var emptyStateView: some View {
-        HStack {
-            Spacer()
-            VStack(spacing: DesignTokens.Spacing.sm) {
-                Image(systemName: "speaker.slash")
-                    .font(.title)
-                    .foregroundStyle(DesignTokens.Colors.textTertiary)
-                Text("No apps playing audio")
-                    .font(.callout)
-                    .foregroundStyle(DesignTokens.Colors.textSecondary)
-
-                let ignoredCount = audioEngine.settingsManager.getIgnoredAppInfo().count
-                if ignoredCount > 0 {
-                    Text("\(ignoredCount) ignored · edit to manage")
-                        .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(DesignTokens.Colors.textTertiary)
-                }
+        let ignoredCount = audioEngine.settingsManager.getIgnoredAppInfo().count
+        ContentUnavailableView {
+            Label("No apps playing audio", systemImage: "speaker.slash")
+                .font(.callout)
+        } description: {
+            if ignoredCount > 0 {
+                Text("\(ignoredCount) ignored · edit to manage")
+                    .font(DesignTokens.Typography.caption)
             }
-            Spacer()
         }
         .padding(.vertical, DesignTokens.Spacing.xl)
     }

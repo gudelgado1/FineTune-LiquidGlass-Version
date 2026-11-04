@@ -2,7 +2,7 @@
 import AppKit
 
 /// Manages event monitors for detecting clicks outside a component.
-/// Uses the same pattern as PopoverHost for reliable click-outside detection.
+/// Uses a local event monitor for reliable click-outside detection.
 final class ClickOutsideCoordinator {
     private var localEventMonitor: Any?
     private var globalEventMonitor: Any?

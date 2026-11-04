@@ -19,8 +19,18 @@ enum DesignTokens {
     /// per-token RGBA values.
     static func dynamicColor(name: String, light: NSColor, dark: NSColor) -> Color {
         Color(nsColor: NSColor(name: NSColor.Name(name)) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            let base = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            // `bestMatch` never returns the high-contrast names, so read the setting.
+            let highContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+            return highContrast ? increasedContrast(base) : base
         })
+    }
+
+    /// Strengthens a translucent token for the system Increase Contrast setting.
+    /// Fully clear tokens stay clear: they mean "no surface", not a faint one.
+    static func increasedContrast(_ color: NSColor) -> NSColor {
+        guard color.alphaComponent > 0 else { return color }
+        return color.withAlphaComponent(min(1, color.alphaComponent * 1.5))
     }
 
     // MARK: - Colors
@@ -55,7 +65,7 @@ enum DesignTokens {
         static let accentPrimary: Color = .accentColor
 
         /// Mute button active (muted state) - red for visibility
-        static let mutedIndicator = Color(nsColor: .systemRed).opacity(0.85)
+        static let mutedIndicator = Color(nsColor: .systemRed)
 
         /// Default device indicator - uses accent color
         static let defaultDevice: Color = .accentColor
@@ -78,9 +88,6 @@ enum DesignTokens {
 
         /// Slider filled track - uses accent color
         static let sliderFill: Color = .accentColor
-
-        /// Slider thumb
-        static let sliderThumb: Color = .white
 
         /// Unity marker on slider
         static let unityMarker: Color = .primary.opacity(0.5)
@@ -122,9 +129,6 @@ enum DesignTokens {
 
         // MARK: Menu/Picker
 
-        /// Menu button background
-        static let menuBackground: Color = .clear
-
         /// Menu button border. Light bumped for visible edge on glass surface.
         static let menuBorder = dynamicColor(
             name: "menuBorder",
@@ -139,12 +143,6 @@ enum DesignTokens {
             light: NSColor.black.withAlphaComponent(0.32),
             dark: NSColor.white.withAlphaComponent(0.25)
         )
-
-        /// Picker background
-        static let pickerBackground: Color = .primary.opacity(0.08)
-
-        /// Picker hover
-        static let pickerHover: Color = .primary.opacity(0.12)
 
         // MARK: Hover & Glass Surface
 
@@ -247,22 +245,22 @@ enum DesignTokens {
         static let sectionHeaderText = dynamicColor(
             name: "sectionHeaderText",
             light: NSColor.black.withAlphaComponent(0.65),
-            dark: NSColor.white.withAlphaComponent(0.40)
+            dark: NSColor.white.withAlphaComponent(0.60)
         )
 
         // MARK: VU Meter (Professional audio standard - NOT themed)
 
         /// VU meter green segments (bars 0-3, safe levels)
-        static let vuGreen = Color(red: 0.20, green: 0.78, blue: 0.40)
+        static let vuGreen = Color(nsColor: .systemGreen)
 
         /// VU meter yellow segments (bars 4-5, caution)
-        static let vuYellow = Color(red: 0.95, green: 0.75, blue: 0.20)
+        static let vuYellow = Color(nsColor: .systemYellow)
 
         /// VU meter orange segment (bar 6, warning)
-        static let vuOrange = Color(red: 0.95, green: 0.50, blue: 0.20)
+        static let vuOrange = Color(nsColor: .systemOrange)
 
         /// VU meter red segment (bar 7, peak/clip)
-        static let vuRed = Color(red: 0.90, green: 0.25, blue: 0.25)
+        static let vuRed = Color(nsColor: .systemRed)
 
         /// VU meter unlit bar color (matches sliderTrack for visual consistency)
         static let vuUnlit: Color = .primary.opacity(0.15)
@@ -285,14 +283,14 @@ enum DesignTokens {
         static let autoEQEmptyIcon = dynamicColor(
             name: "autoEQEmptyIcon",
             light: NSColor(white: 0.45, alpha: 1.0),
-            dark: NSColor(white: 0.267, alpha: 1.0)
+            dark: NSColor(white: 0.60, alpha: 1.0)
         )
 
         /// AutoEQ toggle label text color (Correction / Preamp labels).
         static let autoEQToggleLabel = dynamicColor(
             name: "autoEQToggleLabel",
             light: NSColor.black.withAlphaComponent(0.65),
-            dark: NSColor.white.withAlphaComponent(0.5)
+            dark: NSColor.white.withAlphaComponent(0.60)
         )
 
         /// High-emphasis icon foreground on glass controls. Keeps icons visible
@@ -304,12 +302,6 @@ enum DesignTokens {
         )
 
         // MARK: HUD
-
-        /// Active dot in Tahoe HUD tick track
-        static let hudDotActive: Color = .primary.opacity(0.85)
-
-        /// Inactive dot in Tahoe HUD tick track
-        static let hudDotInactive: Color = .primary.opacity(0.18)
 
         /// Active tile in Classic HUD segment row
         static let hudTileActive: Color = .primary.opacity(0.7)
@@ -329,13 +321,11 @@ enum DesignTokens {
     //   .footnote   → 10 pt            .caption  → 10 pt
 
     enum Typography {
-        /// Uppercase section label (e.g. "APPS", "OUTPUT DEVICES").
-        /// caption + semibold + tracking matches native macOS sidebar headers.
-        static let sectionHeader = Font.system(.caption, weight: .semibold)
+        /// Section label (e.g. "Apps", "Output Devices").
+        /// subheadline + semibold in sentence case, like native macOS section headers.
+        static let sectionHeader = Font.system(.subheadline, weight: .semibold)
 
         /// Letter-spacing for section headers — tighter than before to feel
-        /// lighter without losing readability.
-        static let sectionHeaderTracking: CGFloat = 0.8
 
         /// Primary row label — app / device name at rest.
         static let rowName = Font.body
@@ -354,16 +344,7 @@ enum DesignTokens {
         static let pickerText = Font.subheadline        // 11 pt
 
         /// EQ frequency axis labels — kept at 9 pt because the graph is dense.
-        static let eqLabel = Font.system(size: 9, weight: .medium, design: .monospaced)
-
-        /// AutoEQ profile card name.
-        static let cardProfileName = Font.system(.callout, weight: .semibold)
-
-        /// AutoEQ card sub-label (source / measuredBy).
-        static let cardSource = Font.caption
-
-        /// Settings section / card header.
-        static let cardHeader = Font.headline           // 13 pt semibold
+        static let eqLabel = Font.system(size: 10, weight: .medium, design: .monospaced)
 
         /// Settings row helper description.
         static let rowDescription = Font.footnote       // 10 pt
@@ -390,8 +371,6 @@ enum DesignTokens {
         /// 20pt - Extra large
         static let xl: CGFloat = 20
 
-        /// 24pt - Extra extra large
-        static let xxl: CGFloat = 24
     }
 
     // MARK: - Dimensions
@@ -405,20 +384,15 @@ enum DesignTokens {
         /// Content padding
         static var contentPadding: CGFloat { Spacing.lg }
 
-        /// Available content width after padding
-        static var contentWidth: CGFloat {
-            popupWidth - (contentPadding * 2)
-        }
-
         // MARK: Fixed Dimensions
-
-        /// Max height for scrollable content
-        static let maxScrollHeight: CGFloat = 400
 
         // MARK: Corner Radii (rounded style - 10pt)
 
         /// Corner radius for popup
         static let cornerRadius: CGFloat = 12
+
+        /// Popup corner radius, matching the macOS 27 popover
+        static let popupRadius: CGFloat = 20
 
         /// Corner radius for row cards (glass bars)
         static let rowRadius: CGFloat = 10
@@ -429,16 +403,10 @@ enum DesignTokens {
         /// App/device icon size
         static let iconSize: CGFloat = 22
 
-        /// Small icon size
-        static let iconSizeSmall: CGFloat = 14
-
         // MARK: Slider Dimensions (minimal style)
 
         /// Slider track height
         static let sliderTrackHeight: CGFloat = 3
-
-        /// Slider thumb width (pill shape)
-        static let sliderThumbWidth: CGFloat = 16
 
         /// Slider thumb height (pill shape)
         static let sliderThumbHeight: CGFloat = 10
@@ -447,7 +415,7 @@ enum DesignTokens {
         static let sliderThumbSize: CGFloat = 12
 
         /// Minimum touch target
-        static let minTouchTarget: CGFloat = 16
+        static let minTouchTarget: CGFloat = 24
 
         /// Row content height
         static let rowContentHeight: CGFloat = 28
@@ -457,8 +425,13 @@ enum DesignTokens {
         /// Slider width
         static let sliderWidth: CGFloat = 140
 
-        /// Minimum slider width
-        static let sliderMinWidth: CGFloat = 120
+        /// Leading inset that aligns a 28pt device badge's trailing edge with an
+        /// app row's VU meter + spacing + 24pt icon, so row names share a column.
+        static let badgeRowLeadingInset: CGFloat = 14
+
+        /// Trailing gap left by rows without boost and output controls, after a
+        /// fixed percentage column, so every slider shares the same start and end.
+        static let rowAccessoryWidth: CGFloat = 20
 
         /// Percentage text width (fixed to prevent layout shift)
         static let percentageWidth: CGFloat = 40
@@ -473,14 +446,8 @@ enum DesignTokens {
         /// Settings row icon column width
         static let settingsIconWidth: CGFloat = 24
 
-        /// Settings slider width
-        static let settingsSliderWidth: CGFloat = 200
-
         /// Settings percentage text width
         static let settingsPercentageWidth: CGFloat = 44
-
-        /// Settings picker width
-        static let settingsPickerWidth: CGFloat = 120
 
     }
 
@@ -490,8 +457,18 @@ enum DesignTokens {
         /// Quick spring for small elements
         static let quick = SwiftUI.Animation.spring(response: 0.2, dampingFraction: 0.85)
 
-        /// Hover transition (brief and precise per HIG)
-        static let hover = SwiftUI.Animation.easeOut(duration: 0.12)
+        /// FineTune tuning, not prescribed HIG timings. Read the preference at
+        /// each interaction so AppKit-backed and SwiftUI controls agree.
+        static var hover: SwiftUI.Animation? {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                ? nil : .easeInOut(duration: 0.18)
+        }
+
+        /// A restrained, reversible disclosure with no extra bounce.
+        static var disclosure: SwiftUI.Animation? {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                ? nil : .smooth(duration: 0.30, extraBounce: 0)
+        }
 
         /// VU meter level change
         static let vuMeterLevel = SwiftUI.Animation.linear(duration: 0.05)

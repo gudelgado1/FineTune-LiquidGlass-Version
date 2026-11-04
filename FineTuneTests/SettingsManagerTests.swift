@@ -365,7 +365,7 @@ struct MenuBarIconStyleTests {
 
     @Test("allCases has 4 styles")
     func allCasesCount() {
-        #expect(MenuBarIconStyle.allCases.count == 4)
+        #expect(MenuBarIconStyle.allCases.count == 5)  // + .device (follows the current output)
     }
 
     @Test("Only 'default' is not a system symbol")
@@ -374,6 +374,7 @@ struct MenuBarIconStyleTests {
         #expect(MenuBarIconStyle.speaker.isSystemSymbol)
         #expect(MenuBarIconStyle.waveform.isSystemSymbol)
         #expect(MenuBarIconStyle.equalizer.isSystemSymbol)
+        #expect(MenuBarIconStyle.device.isSystemSymbol)
     }
 
     @Test("Every style has a non-empty icon name")
@@ -390,5 +391,65 @@ struct MenuBarIconStyleTests {
             let decoded = try JSONDecoder().decode(MenuBarIconStyle.self, from: data)
             #expect(decoded == style)
         }
+    }
+}
+
+// MARK: - Per-device icon overrides (schema v12)
+
+@Suite("SettingsManager — device icon overrides")
+@MainActor
+struct DeviceIconOverrideTests {
+
+    private func makeManager() -> SettingsManager {
+        SettingsManager(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString))
+    }
+
+    @Test("no override by default, so devices keep their automatic icon")
+    func defaultsToNoOverride() {
+        let m = makeManager()
+        #expect(m.getDeviceIconOverride(for: "uid-a") == nil)
+        #expect(m.deviceIconOverrides.isEmpty)
+    }
+
+    @Test("an override round-trips and is scoped to its own device")
+    func overrideIsPerDevice() {
+        let m = makeManager()
+        m.setDeviceIconOverride(for: "uid-a", to: "airpodspro")
+        #expect(m.getDeviceIconOverride(for: "uid-a") == "airpodspro")
+        #expect(m.getDeviceIconOverride(for: "uid-b") == nil, "must not leak onto other devices")
+    }
+
+    @Test("passing nil clears the override and restores the automatic icon")
+    func nilClearsOverride() {
+        let m = makeManager()
+        m.setDeviceIconOverride(for: "uid-a", to: "homepod")
+        m.setDeviceIconOverride(for: "uid-a", to: nil)
+        #expect(m.getDeviceIconOverride(for: "uid-a") == nil)
+        #expect(m.deviceIconOverrides.isEmpty)
+    }
+
+    @Test("resetting all settings drops every override")
+    func resetClearsOverrides() {
+        let m = makeManager()
+        m.setDeviceIconOverride(for: "uid-a", to: "homepod")
+        m.resetAllSettings()
+        #expect(m.deviceIconOverrides.isEmpty)
+    }
+
+    @Test("a settings file written before v12 still loads, with no overrides")
+    func olderSettingsFileStillLoads() throws {
+        // The key is absent in every file written before this feature existed;
+        // decoding must default it rather than throwing and wiping the user's
+        // entire configuration.
+        let json = #"""
+        {
+          "version": 11,
+          "appVolumes": { "com.example.app": 0.5 }
+        }
+        """#
+        let decoded = try JSONDecoder().decode(SettingsManager.Settings.self, from: Data(json.utf8))
+        #expect(decoded.deviceIconOverrides.isEmpty)
+        #expect(decoded.appVolumes["com.example.app"] == 0.5)
     }
 }

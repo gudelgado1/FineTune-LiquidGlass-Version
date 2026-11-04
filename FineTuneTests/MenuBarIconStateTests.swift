@@ -226,4 +226,35 @@ struct StyleIconNameConsistencyTests {
         let baseline = MenuBarIconState.baseline(style: .equalizer, volume: 0.5, muted: false)
         #expect(baseline.image == .systemSymbol(MenuBarIconStyle.equalizer.iconName))
     }
+
+    // MARK: - Device-aware style
+
+    @Test("device wraps an SF Symbol")
+    func deviceImage() {
+        #expect(MenuBarIconState.device(symbol: "airpodspro").image == .systemSymbol("airpodspro"))
+    }
+
+    @Test(".device shows the supplied device symbol regardless of volume")
+    func deviceSymbol() {
+        // Unlike .speaker, this style tracks the DEVICE, not the level.
+        let expected = MenuBarIconState.device(symbol: "airpodspro")
+        for v in [Float(0.0), 0.5, 1.0] {
+            #expect(
+                MenuBarIconState.baseline(style: .device, volume: v, muted: false, deviceSymbol: "airpodspro") == expected,
+                "volume=\(v)"
+            )
+        }
+    }
+
+    @Test(".device ignores mute")
+    func deviceIgnoresMute() {
+        let expected = MenuBarIconState.device(symbol: "homepod")
+        #expect(MenuBarIconState.baseline(style: .device, volume: 0.5, muted: true, deviceSymbol: "homepod") == expected)
+    }
+
+    @Test(".device falls back to the style's own icon when no symbol is supplied")
+    func deviceMatchesDefaultIconName() {
+        let baseline = MenuBarIconState.baseline(style: .device, volume: 0.5, muted: false)
+        #expect(baseline.image == .systemSymbol(MenuBarIconStyle.device.iconName))
+    }
 }

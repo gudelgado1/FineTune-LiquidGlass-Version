@@ -6,7 +6,7 @@ import SwiftUI
 // Inline expansion panel for the AutoEQ Correction section of a DeviceRow.
 // Replaces the equalizer-slider real estate of the per-app EQ panel with a
 // graphical representation of the correction curve, while keeping the
-// existing import button and exposing the search popover via "Browse".
+// import action and presenting the profile browser inline via "Browse".
 //
 // Layout:
 //   ┌──────────────────────────────────────────────┐
@@ -31,8 +31,7 @@ struct AutoEQExpandedPanel: View {
     let onImport: () -> Void
     let onToggleFavorite: (String) -> Void
 
-    @State private var isBrowsePopoverPresented = false
-    @Environment(\.appearancePreference) private var appearancePreference
+    @State private var isBrowsing = false
 
     // MARK: - Resolved profile (for graph + name)
 
@@ -68,16 +67,28 @@ struct AutoEQExpandedPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
-            AutoEQCurveView(
-                profile: resolvedProfile,
-                isCorrectionEnabled: isCorrectionEnabled && selection != nil
-            )
+            if isBrowsing {
+                AutoEQSearchPanel(
+                    profileManager: profileManager,
+                    favoriteIDs: favoriteIDs,
+                    selectedProfileID: selection?.profileID,
+                    onSelect: onSelectProfile,
+                    onDismiss: { isBrowsing = false },
+                    onImport: onImport,
+                    onToggleFavorite: onToggleFavorite,
+                    importErrorMessage: importErrorMessage
+                )
+                .transition(.identity)
+            } else {
+                AutoEQCurveView(
+                    profile: resolvedProfile,
+                    isCorrectionEnabled: isCorrectionEnabled && selection != nil
+                )
+                profileInfoRow
+                controlsRow
+            }
 
-            profileInfoRow
-
-            controlsRow
-
-            if let error = importErrorMessage {
+            if let error = importErrorMessage, !isBrowsing {
                 Text(error)
                     .font(.system(size: 10))
                     .foregroundStyle(.red)
@@ -87,6 +98,9 @@ struct AutoEQExpandedPanel: View {
         .padding(.horizontal, DesignTokens.Spacing.sm)
         .padding(.top, 6)
         .padding(.bottom, 10)
+        // A cross-fade retains the outgoing white curve behind the native search
+        // field. Replace the content atomically; the popup owns its size animation.
+        .animation(nil, value: isBrowsing)
     }
 
     // MARK: - Profile Info Row
@@ -167,49 +181,10 @@ struct AutoEQExpandedPanel: View {
 
             Spacer(minLength: 0)
 
-            // Browse — opens the existing AutoEQSearchPanel as a popover so
-            // users keep access to search / favorites / fetch from catalog.
             actionChip(
                 title: "Browse",
                 systemImage: "magnifyingglass",
-                action: { isBrowsePopoverPresented = true }
-            )
-            .background(
-                PopoverHost(
-                    isPresented: $isBrowsePopoverPresented,
-                    preferredColorScheme: appearancePreference.swiftUIColorScheme,
-                    nsAppearance: appearancePreference.nsAppearance
-                ) {
-                    AutoEQSearchPanel(
-                        profileManager: profileManager,
-                        favoriteIDs: favoriteIDs,
-                        selectedProfileID: selection?.profileID,
-                        onSelect: { profile in
-                            onSelectProfile(profile)
-                            isBrowsePopoverPresented = false
-                        },
-                        onDismiss: { isBrowsePopoverPresented = false },
-                        onImport: {
-                            isBrowsePopoverPresented = false
-                            onImport()
-                        },
-                        onToggleFavorite: onToggleFavorite,
-                        importErrorMessage: importErrorMessage,
-                        isCorrectionEnabled: isCorrectionEnabled,
-                        onCorrectionToggle: onCorrectionToggle,
-                        preampEnabled: preampEnabled,
-                        onPreampToggle: onPreampToggle
-                    )
-                    .frame(width: 260)
-                    .background(
-                        VisualEffectBackground(material: .menu, blendingMode: .behindWindow)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(DesignTokens.Colors.glassBorder, lineWidth: 0.5)
-                    }
-                }
+                action: { isBrowsing = true }
             )
 
             // Import file — direct shortcut for the support file format.

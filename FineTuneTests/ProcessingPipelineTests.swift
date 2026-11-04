@@ -177,6 +177,40 @@ struct BufferMappingTests {
         }
     }
 
+    @Test("Stereo input to 6ch output: signal placed on preferred channels 3/4 (aggregate regression)")
+    func stereoToChannels3and4() {
+        // Regression for: a user aggregate whose stereo speaker sits on channels
+        // 3/4. After flattening + non-stacked wrapping the output buffer exposes
+        // all 6 channels, and the callback must place L/R on the preferred pair
+        // (zero-based 2/3) — channels 1/2 staying silent is exactly what broke.
+        let frames = 64
+        let input = TestABL(buffers: [(channels: 2, frames: frames)])
+        let output = TestABL(buffers: [(channels: 6, frames: frames)])
+
+        let inData = input.data(at: 0)
+        for f in 0..<frames {
+            inData[f * 2] = 0.6      // left
+            inData[f * 2 + 1] = 0.4  // right
+        }
+
+        var vol: Float = 1.0
+        processWithDefaults(
+            input: input, output: output,
+            preferredStereoLeft: 2, preferredStereoRight: 3,
+            currentVol: &vol
+        )
+
+        let outData = output.data(at: 0)
+        for f in 0..<frames {
+            let base = f * 6
+            #expect(outData[base + 2] == 0.6, "Left should be on channel 3 (index 2) at frame \(f)")
+            #expect(outData[base + 3] == 0.4, "Right should be on channel 4 (index 3) at frame \(f)")
+            for ch in [0, 1, 4, 5] {
+                #expect(outData[base + ch] == 0.0, "Channel \(ch) at frame \(f) should be silent")
+            }
+        }
+    }
+
     @Test("Surround 6ch buffer: direct mapping preserves all channels")
     func surroundDirectMapping() {
         let frames = 128
@@ -475,6 +509,26 @@ struct VolumeRampTests {
         let outData = output.data(at: 0)
         let lastSample = outData[(frames - 1) * 2]
         #expect(abs(lastSample) < 1e-6, "Last sample should be near-zero")
+    }
+
+    @Test("Zero target volume: ramp reaches exact digital silence")
+    func zeroTargetReachesExactSilence() {
+        let frames = 8192
+        let input = TestABL(buffers: [(channels: 2, frames: frames)])
+        let output = TestABL(buffers: [(channels: 2, frames: frames)])
+        fill(input, bufferIndex: 0, value: 1.0)
+
+        var vol: Float = 1.0
+        processWithDefaults(
+            input: input, output: output,
+            targetVol: 0.0, rampCoefficient: 0.01,
+            currentVol: &vol
+        )
+
+        #expect(vol == 0.0, "Volume zero must reach exact zero, not only approach it. Got \(vol)")
+        let outData = output.data(at: 0)
+        let lastSample = outData[(frames - 1) * 2]
+        #expect(lastSample == 0.0, "Volume zero must produce exact digital silence. Got \(lastSample)")
     }
 
     @Test("Unmute from zero: ramp recovers to target")
@@ -1064,7 +1118,7 @@ struct LoudnessIntegrationTests {
 
     @Test("Loudness equalizer modifies output vs nil-processor baseline when enabled")
     func loudnessEqualizerModifiesOutput() {
-        let frames = 4096
+        let frames = 48000  // 1 s: the momentary leveler (400 ms window, 100 ms hop) needs more than one hop to change gain
         let sampleRate: Float = 48000
 
         // Create stereo input with moderate amplitude
@@ -1114,7 +1168,7 @@ struct LoudnessIntegrationTests {
 
     @Test("Loudness chain ordering: compensator shapes frequency, equalizer adjusts level")
     func loudnessChainOrdering() {
-        let frames = 4096
+        let frames = 48000  // 1 s: the momentary leveler (400 ms window, 100 ms hop) needs more than one hop to change gain
         let sampleRate = 48000.0
 
         // Create a low-frequency stereo signal that compensator will boost

@@ -16,7 +16,7 @@ struct CrossfadeEqualPowerTests {
           arguments: [Float(0.0), 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45,
                       0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0])
     func equalPowerDuringCrossfade(progress: Float) {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -31,7 +31,7 @@ struct CrossfadeEqualPowerTests {
 
     @Test("Multiplier boundary: progress=0 -> full primary, zero secondary")
     func progressZeroBoundary() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -43,7 +43,7 @@ struct CrossfadeEqualPowerTests {
 
     @Test("Multiplier boundary: progress=1 -> zero primary, full secondary")
     func progressOneBoundary() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -57,7 +57,7 @@ struct CrossfadeEqualPowerTests {
 
     @Test("Primary multiplier monotonically decreases during crossfade")
     func primaryMonotonicallyDecreases() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -74,7 +74,7 @@ struct CrossfadeEqualPowerTests {
 
     @Test("Secondary multiplier monotonically increases during crossfade")
     func secondaryMonotonicallyIncreases() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -97,7 +97,7 @@ struct CrossfadePhaseTransitionTests {
 
     @Test("Full lifecycle: idle -> warmingUp -> crossfading -> idle")
     func fullLifecycle() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         #expect(state.phase == .idle)
         #expect(!state.isActive)
 
@@ -126,7 +126,7 @@ struct CrossfadePhaseTransitionTests {
 
     @Test("Warmup phase: primary=1, secondary=0 regardless of samples processed")
     func warmupFixedMultipliers() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
 
@@ -149,7 +149,7 @@ struct CrossfadePhaseTransitionTests {
 
     @Test("Idle phase after complete: primary=1, secondary=1 (progress reset to 0)")
     func idleAfterComplete() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -163,7 +163,7 @@ struct CrossfadePhaseTransitionTests {
 
     @Test("Double complete() is safe (idempotent reset)")
     func doubleComplete() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -179,7 +179,7 @@ struct CrossfadePhaseTransitionTests {
 
     @Test("beginWarmup during crossfading: full reset, multipliers snap to warmup values")
     func warmupDuringCrossfade() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -204,7 +204,7 @@ struct CrossfadeProgressTests {
 
     @Test("updateProgress: progress monotonically increases during crossfading")
     func progressMonotonicity() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -220,7 +220,7 @@ struct CrossfadeProgressTests {
 
     @Test("updateProgress: progress clamped at 1.0 (never exceeds)")
     func progressClampedAtOne() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 1000  // Short crossfade
         state.beginCrossfading()
@@ -234,7 +234,7 @@ struct CrossfadeProgressTests {
 
     @Test("updateProgress: totalSamples=0 defense (progress clamps to 1.0 immediately)")
     func totalSamplesZeroDefense() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         // totalSamples stays 0 (never set — usage error, but defended against)
         state.beginCrossfading()
@@ -247,7 +247,7 @@ struct CrossfadeProgressTests {
 
     @Test("updateProgress in warmup phase: increments secondarySamplesProcessed, not progress")
     func updateProgressDuringWarmup() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
 
@@ -262,7 +262,7 @@ struct CrossfadeProgressTests {
 
     @Test("updateProgress in idle phase: increments secondarySamplesProcessed only")
     func updateProgressDuringIdle() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         let p = state.updateProgress(samples: 512)
         #expect(p == 0, "Progress should be 0 in idle")
         #expect(state.secondarySamplesProcessed == 512)
@@ -270,7 +270,7 @@ struct CrossfadeProgressTests {
 
     @Test("isWarmupComplete: transitions at exactly minimumWarmupSamples")
     func warmupCompletionThreshold() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
 
@@ -287,7 +287,7 @@ struct CrossfadeProgressTests {
 
     @Test("isCrossfadeComplete: true when progress >= 1.0")
     func crossfadeCompleteThreshold() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 48000
         state.beginCrossfading()
@@ -301,7 +301,7 @@ struct CrossfadeProgressTests {
 
     @Test("Normal crossfade timing: progress reaches 1.0 at totalSamples")
     func crossfadeTiming() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 4800  // 100ms at 48kHz
         state.beginCrossfading()
@@ -320,7 +320,7 @@ struct CrossfadeProgressTests {
 
     @Test("Large buffer sizes: single buffer can complete entire crossfade")
     func singleBufferComplete() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 1000
         state.beginCrossfading()
@@ -332,7 +332,7 @@ struct CrossfadeProgressTests {
 
     @Test("beginCrossfading preserves totalSamples set during warmup")
     func totalSamplesPreserved() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 24000
 
@@ -344,7 +344,7 @@ struct CrossfadeProgressTests {
 
     @Test("complete() resets all state including totalSamples")
     func completeResetsAll() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.beginWarmup()
         state.totalSamples = 24000
         state.beginCrossfading()
@@ -370,7 +370,7 @@ struct CrossfadeIdleTests {
         // This state occurs between the audio thread detecting progress >= 1.0
         // and the main thread calling complete(). The multipliers should reflect
         // "crossfade done, secondary is promoted."
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.progress = 1.0
         // Phase is idle (default), but progress indicates crossfade was completed
 
@@ -382,7 +382,7 @@ struct CrossfadeIdleTests {
 
     @Test("Idle with progress < 1.0: primary=1, secondary=1 (normal idle)")
     func idleNormalState() {
-        var state = CrossfadeState()
+        let state = CrossfadeState()
         state.progress = 0.0
         #expect(state.primaryMultiplier == 1.0)
         #expect(state.secondaryMultiplier == 1.0)

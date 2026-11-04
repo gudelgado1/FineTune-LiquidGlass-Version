@@ -35,10 +35,9 @@ struct DevicePicker: View {
     // Configuration
     let triggerWidth: CGFloat
     var triggerStyle: TriggerStyle = .full
-    private let popoverWidth: CGFloat = 210
+    private let popoverWidth: CGFloat = 240
     private let itemHeight: CGFloat = 26
     private let itemSpacing: CGFloat = 2
-    private let cornerRadius: CGFloat = 8
 
     /// Menu item representation for unified dropdown
     enum MenuItem: Identifiable, Equatable {
@@ -177,15 +176,12 @@ struct DevicePicker: View {
 
     var body: some View {
         triggerButton
-            .background(
-                PopoverHost(
-                    isPresented: $isExpanded,
-                    preferredColorScheme: appearancePreference.swiftUIColorScheme,
-                    nsAppearance: appearancePreference.nsAppearance
-                ) {
-                    dropdownContent
-                }
-            )
+            // The system popover supplies Liquid Glass, shadow, arrow, Esc and
+            // outside-click dismissal.
+            .popover(isPresented: $isExpanded, arrowEdge: .bottom) {
+                dropdownContent
+                    .preferredColorScheme(appearancePreference.swiftUIColorScheme)
+            }
             .onChange(of: mode) { _, newMode in
                 currentMode = newMode
             }
@@ -239,17 +235,7 @@ struct DevicePicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background {
-            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.buttonRadius)
-                .fill(.regularMaterial)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: DesignTokens.Dimensions.buttonRadius)
-                .strokeBorder(
-                    isButtonHovered ? DesignTokens.Colors.glassRowBorderHover : DesignTokens.Colors.glassRowBorder,
-                    lineWidth: 0.5
-                )
-        }
+        .menuTriggerBackground(isHovered: isButtonHovered)
         .onHover { isButtonHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isButtonHovered)
     }
@@ -272,6 +258,7 @@ struct DevicePicker: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(triggerText)
         .help(triggerText)
         .onHover { isButtonHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isButtonHovered)
@@ -311,7 +298,7 @@ struct DevicePicker: View {
 
             // Device list
             ScrollView(.vertical) {
-                LazyVStack(spacing: itemSpacing) {
+                VStack(spacing: itemSpacing) {
                     ForEach(menuItems) { item in
                         deviceRow(for: item)
                     }
@@ -319,18 +306,11 @@ struct DevicePicker: View {
                 .padding(.vertical, 6)
                 .padding(.horizontal, 5)
             }
-            .scrollIndicators(.never)
+            .scrollBounceBehavior(.basedOnSize)
             .frame(maxHeight: 220)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .frame(width: popoverWidth)
-        .background(
-            VisualEffectBackground(material: .menu, blendingMode: .behindWindow)
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .strokeBorder(DesignTokens.Colors.glassBorder, lineWidth: 0.5)
-        }
     }
 
     // MARK: - Device Row
@@ -432,23 +412,25 @@ private struct DevicePickerRow: View {
                 // Default device star
                 if isDefaultDevice {
                     Image(systemName: "star.fill")
-                        .font(.system(size: 9))
+                        .font(.caption)
                         .foregroundStyle(DesignTokens.Colors.textTertiary)
                 }
             }
-            .font(.system(size: 11))
-            .foregroundStyle(isDisabled ? DesignTokens.Colors.textQuaternary : .primary)
-            .padding(.horizontal, 8)
-            .frame(height: 26)
+            .font(.body)
+            .foregroundStyle(isDisabled ? DesignTokens.Colors.textTertiary : .primary)
+            .padding(.horizontal, DesignTokens.Spacing.sm)
+            .frame(minHeight: 28)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(isHovered && !isDisabled ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .fill(isHovered && !isDisabled ? DesignTokens.Colors.hoverSurface : Color.clear)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityValue(isDefaultDevice ? Text("Default device") : Text(verbatim: ""))
         .whenHovered { isHovered = $0 }
     }
 
@@ -481,7 +463,7 @@ private struct DevicePickerRow: View {
             Image(systemName: "hifispeaker.2.fill")
                 .font(.system(size: 13))
                 .frame(width: 16)
-                .foregroundStyle(isDisabled ? DesignTokens.Colors.textQuaternary : DesignTokens.Colors.textSecondary)
+                .foregroundStyle(isDisabled ? DesignTokens.Colors.textTertiary : DesignTokens.Colors.textSecondary)
         case .device(let device):
             if let icon = device.icon {
                 Image(nsImage: icon)
@@ -506,11 +488,11 @@ private struct DevicePickerRow: View {
                 if isDisabled {
                     Text("Not available in multi mode")
                         .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(DesignTokens.Colors.textQuaternary)
+                        .foregroundStyle(DesignTokens.Colors.textSecondary)
                 } else {
                     Text("Follows macOS default")
                         .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(DesignTokens.Colors.textTertiary)
+                        .foregroundStyle(DesignTokens.Colors.textSecondary)
                 }
             }
         case .device(let device):

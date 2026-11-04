@@ -10,7 +10,7 @@ import os
 private nonisolated(unsafe) var gDeviceSlots: UnsafeMutablePointer<AudioObjectID>?
 private nonisolated(unsafe) var gDeviceCount: Int32 = 0
 private nonisolated(unsafe) var gDeviceLock = os_unfair_lock()
-private let gMaxDeviceSlots = 128
+nonisolated private let gMaxDeviceSlots = 128
 
 // MARK: - Crash Signal Handler
 
@@ -24,6 +24,15 @@ private func crashSignalHandler(_ sig: Int32) {
     // Reset to default FIRST to prevent infinite recursion if cleanup itself crashes
     signal(sig, SIG_DFL)
 
+    // Hard deadline on the cleanup below. `AudioHardwareDestroyAggregateDevice`
+    // is a synchronous IPC to `coreaudiod`; when that daemon is wedged it NEVER
+    // returns, so this handler would hang and the process could not be quit at
+    // all (observed 2026-07-29 — only SIGKILL worked). `alarm` + a SIG_DFL
+    // SIGALRM guarantees the process still dies, cleanup or not.
+    // Both calls are async-signal-safe.
+    signal(SIGALRM, SIG_DFL)
+    alarm(5)
+
     if let slots = gDeviceSlots {
         let n = Int(gDeviceCount)
         for i in 0..<n {
@@ -34,11 +43,15 @@ private func crashSignalHandler(_ sig: Int32) {
         }
     }
 
+    // Cleanup finished in time — cancel the watchdog before re-raising so the
+    // real signal (and its crash report) is what terminates us.
+    alarm(0)
+
     // Re-raise with default handler for normal crash behavior (crash report, core dump)
     raise(sig)
 }
 
-private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "CrashGuard")
+nonisolated private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "CrashGuard")
 
 // MARK: - Public API
 
@@ -68,7 +81,7 @@ enum CrashGuard {
 
     /// Registers an aggregate device for crash-safe cleanup.
     /// Call immediately after successful `AudioHardwareCreateAggregateDevice`.
-    static func trackDevice(_ deviceID: AudioObjectID) {
+    nonisolated static func trackDevice(_ deviceID: AudioObjectID) {
         os_unfair_lock_lock(&gDeviceLock)
         guard let slots = gDeviceSlots else {
             os_unfair_lock_unlock(&gDeviceLock)
@@ -87,7 +100,7 @@ enum CrashGuard {
 
     /// Removes an aggregate device from crash-safe tracking.
     /// Call immediately before `AudioHardwareDestroyAggregateDevice`.
-    static func untrackDevice(_ deviceID: AudioObjectID) {
+    nonisolated static func untrackDevice(_ deviceID: AudioObjectID) {
         os_unfair_lock_lock(&gDeviceLock)
         defer { os_unfair_lock_unlock(&gDeviceLock) }
         guard let slots = gDeviceSlots else { return }

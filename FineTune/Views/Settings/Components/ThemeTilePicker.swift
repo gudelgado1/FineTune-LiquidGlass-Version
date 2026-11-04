@@ -62,7 +62,7 @@ private struct ThemeTile: View {
                 .scaleEffect(isHovered && !isSelected ? 1.03 : 1.0)
 
             Text(preference.description)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                .font(.system(.subheadline, weight: isSelected ? .semibold : .regular))
                 .foregroundStyle(isSelected ? .primary : .secondary)
         }
         .contentShape(Rectangle())
@@ -292,7 +292,7 @@ private struct PopupLayoutTile<Mockup: View>: View {
                 .scaleEffect(isHovered && !isSelected ? 1.03 : 1.0)
 
             Text(label)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                .font(.system(.subheadline, weight: isSelected ? .semibold : .regular))
                 .foregroundStyle(isSelected ? .primary : .secondary)
         }
         .contentShape(Rectangle())

@@ -3,12 +3,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// General app preferences. Sections are consolidated into conceptual groups
-/// — `General` (system integration), `Appearance` (visual style across menu
-/// bar and popup), `Backup` (export/import of settings), and a `Danger Zone`
-/// at the bottom for destructive actions. This shape matches Apple's System
-/// Settings density: each section holds multiple related rows instead of
-/// having one section per toggle.
+/// Application preferences, backups and reset. Visual preferences live in Appearance.
 @MainActor
 struct GeneralTab: View {
     @Bindable var settings: SettingsManager
@@ -33,13 +28,12 @@ struct GeneralTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             generalSection
-            appearanceSection
             backupSection
             dangerZoneSection
 
             if let error = backupErrorMessage {
                 Text(error)
-                    .font(.system(size: 11))
+                    .font(.subheadline)
                     .foregroundStyle(.red)
                     .padding(.horizontal, 4)
             }
@@ -62,7 +56,7 @@ struct GeneralTab: View {
     /// System integration toggles: how FineTune relates to login, notifications,
     /// and other OS-level behaviours.
     private var generalSection: some View {
-        SettingsSection("General") {
+        SettingsSection("General Settings") {
             SettingsRow(
                 "Launch at Login",
                 description: "Start FineTune when you log in",
@@ -80,57 +74,6 @@ struct GeneralTab: View {
                 systemImage: "bell"
             ) {
                 Toggle("", isOn: $settings.appSettings.showDeviceDisconnectAlerts)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .labelsHidden()
-            }
-        }
-    }
-
-    // MARK: - Appearance
-
-    /// Everything visual: theme, menu bar icon, popup density. Grouped because
-    /// users typically tune all three together when personalising the app.
-    private var appearanceSection: some View {
-        SettingsSection("Appearance") {
-            SettingsRow(
-                "Theme",
-                description: "Match macOS, or lock to Light or Dark",
-                systemImage: "circle.lefthalf.filled"
-            ) {
-                ThemeTilePicker(selection: $settings.appSettings.appearance)
-            }
-            SettingsRowDivider()
-            SettingsRow(
-                "Menu Bar Icon",
-                description: "How FineTune appears in your menu bar",
-                systemImage: "menubar.rectangle"
-            ) {
-                IconStyleSegmentedControl(selection: $settings.appSettings.menuBarIconStyle)
-            }
-            SettingsRowDivider()
-            SettingsRow(
-                "Popup Width",
-                description: "How wide the menu bar popup is",
-                systemImage: "arrow.left.and.right"
-            ) {
-                PopupWidthTilePicker(selection: $settings.appSettings.popupWidth)
-            }
-            SettingsRowDivider()
-            SettingsRow(
-                "Popup Density",
-                description: "Breathing room between sections",
-                systemImage: "arrow.up.and.down"
-            ) {
-                PopupDensityTilePicker(selection: $settings.appSettings.popupDensity)
-            }
-            SettingsRowDivider()
-            SettingsRow(
-                "Sound Effects Row",
-                description: "Show the system alert-volume control in the popup",
-                systemImage: "bell"
-            ) {
-                Toggle("", isOn: $settings.appSettings.showSoundEffectsRow)
                     .toggleStyle(.switch)
                     .controlSize(.small)
                     .labelsHidden()

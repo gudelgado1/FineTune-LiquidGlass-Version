@@ -21,8 +21,16 @@ final class MenuBarIconCoordinator {
     private var lastObservedDeviceID: AudioDeviceID?
     private var started = false
 
-    init(deviceVolumeMonitor: DeviceVolumeMonitor, settings: SettingsManager) {
+    /// Supplies the connected output devices for the device-aware icon style.
+    private let deviceProvider: any AudioDeviceProviding
+
+    init(
+        deviceVolumeMonitor: DeviceVolumeMonitor,
+        deviceProvider: any AudioDeviceProviding,
+        settings: SettingsManager
+    ) {
         self.deviceVolumeMonitor = deviceVolumeMonitor
+        self.deviceProvider = deviceProvider
         self.settings = settings
     }
 
@@ -78,14 +86,21 @@ final class MenuBarIconCoordinator {
         return MenuBarIconState.baseline(
             style: settings.appSettings.menuBarIconStyle,
             volume: volume,
-            muted: muted
+            muted: muted,
+            deviceSymbol: currentDeviceSymbol()
         )
     }
 
+    /// Symbol for the device currently receiving system audio, honouring a
+    /// per-device override. Shared with the device rows so the menu bar and the
+    /// popup can never disagree about what a device looks like.
     private func currentDeviceSymbol() -> String {
-        let id = deviceVolumeMonitor.defaultDeviceID
-        guard id.isValid else { return "hifispeaker" }
-        return id.suggestedIconSymbol()
+        MenuBarDeviceIconResolver.resolveSymbol(
+            priorityOrder: settings.devicePriorityOrder,
+            outputDevices: deviceProvider.outputDevices,
+            defaultDeviceID: deviceVolumeMonitor.defaultDeviceID,
+            overrideForUID: { [settings] uid in settings.getDeviceIconOverride(for: uid) }
+        )
     }
 
     private func flashDuration() -> TimeInterval {
@@ -124,6 +139,10 @@ final class MenuBarIconCoordinator {
             _ = deviceVolumeMonitor.muteStates[id]
             _ = settings.appSettings.menuBarIconStyle
             _ = settings.appSettings.hudStyle
+            // The device-aware style derives its symbol from these.
+            _ = settings.devicePriorityOrder
+            _ = deviceProvider.outputDevices
+            _ = settings.deviceIconOverrides
         } onChange: { [weak self] in
             // onChange fires in willSet — the tracked properties are still at their
             // pre-change values inside this closure. Re-register synchronously so the

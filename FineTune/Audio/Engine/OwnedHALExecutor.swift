@@ -1,0 +1,91 @@
+import Foundation
+import os
+
+nonisolated enum TapLifecycleError: Error, Equatable, LocalizedError {
+    case deadline, saturated, retirementFailed, asynchronousRequired
+    var errorDescription: String? {
+        switch self {
+        case .deadline: return "Core Audio did not answer before the deadline. Pending work still owns its resources."
+        case .saturated: return "Audio worker capacity is busy. Capture can retry when capacity is available."
+        case .retirementFailed: return "Audio resource cleanup has not been acknowledged. New capture is paused."
+        case .asynchronousRequired: return "Native capture requires asynchronous activation."
+        }
+    }
+}
+
+/// Bounded synchronous work outside MainActor. Ownership transfers at submission:
+/// discard runs exactly once for every result not delivered successfully, including
+/// rejection, cancellation and late completion. A slot remains held through discard.
+nonisolated final class OwnedHALExecutor: Sendable {
+    private let count = OSAllocatedUnfairLock(initialState: 0)
+    private let limit: Int
+    init(limit: Int = 4) { precondition(limit > 0); self.limit = limit }
+    var hasCapacity: Bool { count.withLock { $0 < limit } }
+    var activeCount: Int { count.withLock { $0 } }
+
+    func run<T: Sendable>(timeout: TimeInterval = 4,
+                          work: @escaping @Sendable () throws -> T,
+                          discard: @escaping @Sendable (Result<T, Error>) -> Void = { _ in }) async throws -> T {
+        // Publish the actual result under the same lock the awaiting actor
+        // acquires. A continuation is only the wakeup, never the data channel.
+        let state = OSAllocatedUnfairLock<(finished: Bool, continuation: CheckedContinuation<Void, Never>?, result: Result<T, Error>?)>(initialState: (false, nil, nil))
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let cancelled = state.withLock { value -> Bool in
+                    if value.finished { return true }
+                    value.continuation = continuation
+                    return false
+                }
+                if cancelled {
+                    discard(.failure(CancellationError()))
+                    continuation.resume()
+                    return
+                }
+                let admitted = count.withLock { value in
+                    guard value < limit else { return false }; value += 1; return true
+                }
+                guard admitted else {
+                    discard(.failure(TapLifecycleError.saturated))
+                    let waiter = state.withLock { value in
+                        guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                        value.finished = true; value.result = .failure(TapLifecycleError.saturated)
+                        defer { value.continuation = nil }; return value.continuation
+                    }
+                    waiter?.resume()
+                    return
+                }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + max(0, timeout)) {
+                    let waiter = state.withLock { value in
+                        guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                        value.finished = true; value.result = .failure(TapLifecycleError.deadline)
+                        defer { value.continuation = nil }; return value.continuation
+                    }
+                    waiter?.resume()
+                }
+                let thread = Thread { [self] in
+                    let result = Result { try work() }
+                    let waiter = state.withLock { value in
+                        guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                        value.finished = true; value.result = result
+                        defer { value.continuation = nil }; return value.continuation
+                    }
+                    if case .failure = result { discard(result) }
+                    else if waiter == nil { discard(result) }
+                    count.withLock { $0 -= 1 }
+                    waiter?.resume()
+                }
+                thread.name = "FineTune.HAL.Lifecycle"
+                thread.stackSize = 1024 * 1024
+                thread.start()
+            }
+        } onCancel: {
+            let waiter = state.withLock { value in
+                guard !value.finished else { return nil as CheckedContinuation<Void, Never>? }
+                value.finished = true; value.result = .failure(CancellationError())
+                defer { value.continuation = nil }; return value.continuation
+            }
+            waiter?.resume()
+        }
+        return try state.withLock { $0.result! }.get()
+    }
+}

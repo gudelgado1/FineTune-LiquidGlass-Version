@@ -56,6 +56,18 @@ extension AudioDeviceID {
 
     /// Returns the first output stream index in the device's global stream list.
     /// CATapDescription(deviceUID:stream:) expects this global index, not an output-only index.
+    /// Number of streams in the given scope. Counts streams, not channels.
+    nonisolated func streamCount(scope: AudioObjectPropertyScope) -> Int {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(self, &address, 0, nil, &size) == noErr else { return 0 }
+        return Int(size) / MemoryLayout<AudioObjectID>.size
+    }
+
     nonisolated func firstOutputStreamIndex() throws -> UInt {
         let globalStreams = try readStreams(scope: kAudioObjectPropertyScopeGlobal)
         for (index, streamID) in globalStreams.enumerated() {
@@ -93,30 +105,4 @@ extension AudioDeviceID {
         return (left, right)
     }
 
-    /// Returns the total number of output channels reported by the device's
-    /// stream configuration (sum of all output buffers).
-    func outputChannelCount() -> Int {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var size: UInt32 = 0
-        let sizeErr = AudioObjectGetPropertyDataSize(self, &address, 0, nil, &size)
-        guard sizeErr == noErr, size >= UInt32(MemoryLayout<AudioBufferList>.size) else {
-            return 0
-        }
-
-        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
-        defer { raw.deallocate() }
-
-        let list = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
-        var mutableSize = size
-        let dataErr = AudioObjectGetPropertyData(self, &address, 0, nil, &mutableSize, list)
-        guard dataErr == noErr else { return 0 }
-
-        let bufferList = UnsafeMutableAudioBufferListPointer(list)
-        return bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
-    }
 }

@@ -87,87 +87,55 @@ struct EQPresetPicker: View {
         }
     }
 
-    var body: some View {
-        GroupedDropdownMenu(
-            sections: sections,
-            itemsForSection: { items(for: $0) },
-            sectionTitle: { $0.title },
-            selectedItem: selectedItem,
-            maxHeight: 320,
-            width: 100,
-            popoverWidth: 170,
-            onSelect: handleSelect
-        ) { selected in
-            Text(selected?.name ?? "Custom")
-        } itemContent: { item, isSelected in
-            if item.isUserPreset {
-                UserPresetItemView(
-                    item: item,
-                    isSelected: isSelected,
-                    onDelete: onDeleteUserPreset
-                )
-            } else {
-                BuiltInPresetItemView(item: item, isSelected: isSelected)
+    /// A preset selects a curve; the app keeps ownership of the EQ enable state.
+    private var selection: Binding<String?> {
+        Binding(
+            get: { selectedItem?.id },
+            set: { id in
+                guard let id,
+                      let item = sections.flatMap({ items(for: $0) }).first(where: { $0.id == id }) else { return }
+                handleSelect(item)
             }
-        }
+        )
     }
-}
-
-// MARK: - Built-In Preset Item
-
-private struct BuiltInPresetItemView: View {
-    let item: EQPickerItem
-    let isSelected: Bool
 
     var body: some View {
-        HStack(spacing: DesignTokens.Spacing.xs) {
-            Text(item.name)
-                .lineLimit(1)
-            Spacer(minLength: DesignTokens.Spacing.xs)
-            if isSelected {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-            }
-        }
-    }
-}
-
-// MARK: - User Preset Item (with hover-revealed delete)
-
-private struct UserPresetItemView: View {
-    let item: EQPickerItem
-    let isSelected: Bool
-    let onDelete: (UUID) -> Void
-
-    @State private var isHovered = false
-
-    var body: some View {
-        HStack(spacing: DesignTokens.Spacing.xs) {
-            Text(item.name)
-                .lineLimit(1)
-            Spacer(minLength: DesignTokens.Spacing.xs)
-            if isSelected {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-            }
-            if let userID = item.userPresetID {
-                Button {
-                    onDelete(userID)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 10))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(isHovered ? DesignTokens.Colors.interactiveHover : .clear)
+        // Native menu tracking preserves the parent panel's key status. A custom
+        // keyable child panel made the parent's glass switch to its inactive
+        // backdrop every time the preset list opened.
+        Menu {
+            Picker("Preset", selection: selection) {
+                ForEach(sections) { section in
+                    Section(section.title) {
+                        ForEach(items(for: section)) { item in
+                            Text(item.name).tag(Optional(item.id))
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Delete preset \(item.name)")
-                .help("Delete preset")
             }
+            .pickerStyle(.inline)
+            .labelsHidden()
+
+            if !userPresets.isEmpty {
+                Divider()
+                Menu("Delete User Preset") {
+                    ForEach(userPresets) { preset in
+                        Button(preset.name, role: .destructive) {
+                            onDeleteUserPreset(preset.id)
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(selectedItem?.name ?? "Custom")
         }
-        .whenHovered { isHovered = $0 }
-        .animation(DesignTokens.Animation.hover, value: isHovered)
+        .menuStyle(.borderedButton)
+        .menuActionDismissBehavior(.enabled)
+        .controlSize(.small)
+        .frame(width: 100)
+        .help("Choose an EQ preset")
+        .accessibilityLabel("EQ preset")
+        .accessibilityValue(selectedItem?.name ?? "Custom")
     }
 }
 

@@ -37,11 +37,11 @@ struct MuteButtonColorInvariantTests {
     @Test("mutedIndicator is red-dominant in light")
     func mutedIndicatorIsRedDominantLight() {
         let c = resolve(DesignTokens.Colors.mutedIndicator, appearance: Self.aqua)
-        // Red strongly above green/blue; alpha around 0.85 (the token's intent).
+        // Red strongly above green/blue; fully opaque so the system color keeps its contrast.
         #expect(c.redComponent > 0.7)
         #expect(c.redComponent - c.greenComponent > 0.4)
         #expect(c.redComponent - c.blueComponent > 0.4)
-        #expect(abs(c.alphaComponent - 0.85) < 0.02)
+        #expect(c.alphaComponent > 0.98)
     }
 
     @Test("mutedIndicator is red-dominant in dark")
@@ -50,6 +50,6 @@ struct MuteButtonColorInvariantTests {
         #expect(c.redComponent > 0.7)
         #expect(c.redComponent - c.greenComponent > 0.4)
         #expect(c.redComponent - c.blueComponent > 0.4)
-        #expect(abs(c.alphaComponent - 0.85) < 0.02)
+        #expect(c.alphaComponent > 0.98)
     }
 }

@@ -1,7 +1,7 @@
 // FineTune/Settings/SettingsManager.swift
 import Foundation
 import os
-import ServiceManagement
+
 
 
 // MARK: - Settings Manager
@@ -9,18 +9,21 @@ import ServiceManagement
 @Observable
 @MainActor
 final class SettingsManager {
+    @ObservationIgnored var onSettingsImported: (() -> Void)?
     private var settings: Settings
     private var saveTask: Task<Void, Never>?
+    private let loginService: any LaunchAtLoginManaging
     private let settingsURL: URL
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "SettingsManager")
 
     struct Settings: Codable {
-        var version: Int = 11
+        var version: Int = 12
         var appVolumes: [String: Float] = [:]
         var appDeviceRouting: [String: String] = [:]  // bundleID → deviceUID
         var appMutes: [String: Bool] = [:]  // bundleID → isMuted
         var appBoosts: [String: Float] = [:]  // bundleID → boost rawValue (1.0, 2.0, 3.0, 4.0)
         var appEQSettings: [String: EQSettings] = [:]  // bundleID → EQ settings
+        var deviceIconOverrides: [String: String] = [:]  // device UID → SF Symbol name
         var appSettings: AppSettings = AppSettings()  // App-wide settings
         var systemSoundsFollowsDefault: Bool = true  // Whether system sounds follows macOS default
         var appDeviceSelectionMode: [String: DeviceSelectionMode] = [:]  // bundleID → selection mode
@@ -90,6 +93,7 @@ final class SettingsManager {
             pinnedAppInfo = try c.decodeIfPresent([String: PinnedAppInfo].self, forKey: .pinnedAppInfo) ?? [:]
             ignoredApps = try c.decodeIfPresent(Set<String>.self, forKey: .ignoredApps) ?? []
             ignoredAppInfo = try c.decodeIfPresent([String: IgnoredAppInfo].self, forKey: .ignoredAppInfo) ?? [:]
+            deviceIconOverrides = try c.decodeIfPresent([String: String].self, forKey: .deviceIconOverrides) ?? [:]
             ddcVolumes = try c.decodeIfPresent([String: Int].self, forKey: .ddcVolumes) ?? [:]
             ddcMuteStates = try c.decodeIfPresent([String: Bool].self, forKey: .ddcMuteStates) ?? [:]
             ddcSavedVolumes = try c.decodeIfPresent([String: Int].self, forKey: .ddcSavedVolumes) ?? [:]
@@ -112,8 +116,10 @@ final class SettingsManager {
         }
     }
 
-    init(directory: URL? = nil) {
-        let baseDir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("FineTune")
+    init(directory: URL? = nil, loginService: (any LaunchAtLoginManaging)? = nil) {
+        self.loginService = loginService ?? (AppDataLocations.isUnitTesting
+            ? InMemoryLaunchAtLoginService() : SystemLaunchAtLoginService())
+        let baseDir = directory ?? AppDataLocations.applicationSupport
         self.settingsURL = baseDir.appendingPathComponent("settings.json")
         self.settings = Settings()
         loadFromDisk()
@@ -542,64 +548,6 @@ final class SettingsManager {
         return result
     }
 
-    /// Removes per-app settings for apps that are no longer active, not pinned,
-    /// and have only default values. Preserves device routing (explicit user intent).
-    ///
-    /// - Parameter activeIdentifiers: Persistence identifiers of currently active apps.
-    func pruneStaleSettings(keeping activeIdentifiers: Set<String>) {
-        let allIdentifiers = Set(settings.appVolumes.keys)
-            .union(settings.appBoosts.keys)
-            .union(settings.appMutes.keys)
-            .union(settings.appEQSettings.keys)
-            .union(settings.appDeviceSelectionMode.keys)
-            .union(settings.appSelectedDeviceUIDs.keys)
-
-        var pruned = 0
-        for identifier in allIdentifiers {
-            // Keep active apps
-            if activeIdentifiers.contains(identifier) { continue }
-            // Keep pinned apps
-            if settings.pinnedApps.contains(identifier) { continue }
-            // Keep apps with explicit device routing (user intent)
-            if settings.appDeviceRouting[identifier] != nil { continue }
-
-            // Check if all remaining settings are default values
-            let volume = settings.appVolumes[identifier]
-            let mute = settings.appMutes[identifier]
-            let eq = settings.appEQSettings[identifier]
-            let selectionMode = settings.appDeviceSelectionMode[identifier]
-            let selectedUIDs = settings.appSelectedDeviceUIDs[identifier]
-
-            let boost = settings.appBoosts[identifier]
-
-            let isDefaultVolume = volume == nil || volume == 1.0
-            let isDefaultBoost = boost == nil || boost == BoostLevel.x1.rawValue
-            let isDefaultMute = mute == nil || mute == false
-            let isDefaultEQ = eq == nil || eq == .flat
-            let isDefaultSelectionMode = selectionMode == nil
-            let isDefaultSelectedUIDs = selectedUIDs == nil || selectedUIDs?.isEmpty == true
-
-            guard isDefaultVolume && isDefaultBoost && isDefaultMute && isDefaultEQ
-                    && isDefaultSelectionMode && isDefaultSelectedUIDs else {
-                continue
-            }
-
-            // All values are defaults — safe to prune
-            settings.appVolumes.removeValue(forKey: identifier)
-            settings.appBoosts.removeValue(forKey: identifier)
-            settings.appMutes.removeValue(forKey: identifier)
-            settings.appEQSettings.removeValue(forKey: identifier)
-            settings.appDeviceSelectionMode.removeValue(forKey: identifier)
-            settings.appSelectedDeviceUIDs.removeValue(forKey: identifier)
-            pruned += 1
-        }
-
-        if pruned > 0 {
-            logger.info("Pruned \(pruned) stale app settings entries")
-            scheduleSave()
-        }
-    }
-
     // MARK: - Per-Device AutoEQ
 
     func getAutoEQSelection(for deviceUID: String) -> AutoEQSelection? {
@@ -717,13 +665,8 @@ final class SettingsManager {
 
     private func setLaunchAtLogin(_ enabled: Bool) {
         do {
-            if enabled {
-                try SMAppService.mainApp.register()
-                logger.info("Registered for launch at login")
-            } else {
-                try SMAppService.mainApp.unregister()
-                logger.info("Unregistered from launch at login")
-            }
+            try loginService.setEnabled(enabled)
+            logger.info("Launch at login set to \(enabled)")
         } catch {
             logger.error("Failed to set launch at login: \(error.localizedDescription)")
         }
@@ -731,18 +674,42 @@ final class SettingsManager {
 
     /// Returns the actual launch at login status from the system
     var isLaunchAtLoginEnabled: Bool {
-        SMAppService.mainApp.status == .enabled
+        loginService.isEnabled
     }
 
     // MARK: - Reset All Settings
 
     /// Resets all per-app settings and app-wide settings to defaults
+    // MARK: - Per-Device Icon Override
+
+    /// The user's chosen SF Symbol for a device, or nil when the automatic icon
+    /// (derived from name + transport) should be used.
+    func getDeviceIconOverride(for deviceUID: String) -> String? {
+        settings.deviceIconOverrides[deviceUID]
+    }
+
+    /// All UID → symbol overrides, for views rendering many devices at once.
+    var deviceIconOverrides: [String: String] {
+        settings.deviceIconOverrides
+    }
+
+    /// Sets or clears a device's icon override. `nil` restores the automatic icon.
+    func setDeviceIconOverride(for deviceUID: String, to symbol: String?) {
+        if let symbol {
+            settings.deviceIconOverrides[deviceUID] = symbol
+        } else {
+            settings.deviceIconOverrides.removeValue(forKey: deviceUID)
+        }
+        scheduleSave()
+    }
+
     func resetAllSettings() {
         settings.appVolumes.removeAll()
         settings.appBoosts.removeAll()
         settings.appDeviceRouting.removeAll()
         settings.appMutes.removeAll()
         settings.appEQSettings.removeAll()
+        settings.deviceIconOverrides.removeAll()
         settings.pinnedApps.removeAll()
         settings.pinnedAppInfo.removeAll()
         settings.ignoredApps.removeAll()
@@ -770,7 +737,7 @@ final class SettingsManager {
         settings.userEQPresets.removeAll()
 
         // Also unregister from launch at login
-        try? SMAppService.mainApp.unregister()
+        try? loginService.setEnabled(false)
 
         scheduleSave()
         logger.info("Reset all settings to defaults")
@@ -844,7 +811,9 @@ final class SettingsManager {
     func importData(_ data: Data) throws {
         let imported = try JSONDecoder().decode(Settings.self, from: data)
         settings = imported
+        setLaunchAtLogin(imported.appSettings.launchAtLogin)
         scheduleSave()
+        onSettingsImported?()
         logger.info("Imported settings: \(self.settings.appVolumes.count) volumes, \(self.settings.appEQSettings.count) EQ settings, \(self.settings.appDeviceRouting.count) device routings")
     }
 

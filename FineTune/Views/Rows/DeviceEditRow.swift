@@ -17,9 +17,15 @@ struct DeviceEditRow<ExpandedContent: View>: View {
     let onReorder: (Int) -> Void
     let onToggleExpand: () -> Void
     let onToggleHidden: () -> Void
+    /// User's icon override for this device, or nil while it uses the automatic icon.
+    var iconOverride: String? = nil
+    /// Persists a new override; `nil` restores the automatic icon.
+    var onIconOverrideChange: (String?) -> Void = { _ in }
     @ViewBuilder let expandedContent: () -> ExpandedContent
 
     @State private var isInfoButtonHovered = false
+    @State private var isIconHovered = false
+    @State private var showingIconPicker = false
 
     var body: some View {
         ExpandableGlassRow(isExpanded: isExpanded) {
@@ -55,18 +61,44 @@ struct DeviceEditRow<ExpandedContent: View>: View {
             )
 
             HStack(spacing: DesignTokens.Spacing.sm) {
-                Group {
-                    if let icon = device.icon {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                    } else {
-                        Image(systemName: isInputDevice ? "mic" : "speaker.wave.2")
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(.secondary)
+                Button {
+                    showingIconPicker = true
+                } label: {
+                    Group {
+                        // An override wins over the device's own icon image —
+                        // that is the whole point of setting one.
+                        if let iconOverride {
+                            Image(systemName: iconOverride)
+                                .symbolRenderingMode(.hierarchical)
+                        } else if let icon = device.icon {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                        } else {
+                            Image(systemName: isInputDevice ? "mic" : "speaker.wave.2")
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(width: DesignTokens.Dimensions.iconSize, height: DesignTokens.Dimensions.iconSize)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(isIconHovered ? DesignTokens.Colors.deviceBadgeMonoFill : Color.clear)
+                    )
+                    .contentShape(Rectangle())
                 }
-                .frame(width: DesignTokens.Dimensions.iconSize, height: DesignTokens.Dimensions.iconSize)
+                .buttonStyle(.plain)
+                .onHover { isIconHovered = $0 }
+                .help("Change this device's icon")
+                .accessibilityLabel("Change icon for \(device.name)")
+                .popover(isPresented: $showingIconPicker, arrowEdge: .bottom) {
+                    DeviceIconPicker(
+                        deviceName: device.name,
+                        transport: device.id.readTransportType(),
+                        currentOverride: iconOverride,
+                        onSelect: onIconOverrideChange
+                    )
+                }
 
                 Text(device.name)
                     .font(DesignTokens.Typography.rowName)
@@ -75,7 +107,7 @@ struct DeviceEditRow<ExpandedContent: View>: View {
 
                 if isDefault {
                     Text("DEFAULT")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(DesignTokens.Colors.textSecondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -154,7 +186,7 @@ struct DeviceEditRow<ExpandedContent: View>: View {
         .onHover { isInfoButtonHovered = $0 }
         .help(isExpanded ? "Close device inspector" : "Device inspector")
         .accessibilityLabel(isExpanded ? "Close device inspector" : "Open device inspector")
-        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isExpanded)
+        .animation(DesignTokens.Animation.disclosure, value: isExpanded)
         .animation(DesignTokens.Animation.hover, value: isInfoButtonHovered)
     }
 }
@@ -320,7 +352,7 @@ struct DeviceEditRowTapCarveoutPreview: View {
                         lastEvent = "Reorder to \(newIndex + 1)"
                     },
                     onToggleExpand: {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        withAnimation(DesignTokens.Animation.disclosure) {
                             let uid = MockData.sampleDevices[0].uid
                             expandedUID = (expandedUID == uid) ? nil : uid
                             lastEvent = "Toggled expand → \(expandedUID ?? "nil")"

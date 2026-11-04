@@ -1,4 +1,5 @@
 // FineTune/Views/Settings/SettingsRootView.swift
+import AppKit
 import SwiftUI
 
 @MainActor
@@ -13,434 +14,354 @@ struct SettingsRootView: View {
     let shortcutsRegistry: ShortcutsRegistry
     @ObservedObject var updateManager: UpdateManager
 
-    enum Section: String, Hashable, CaseIterable, Identifiable {
-        case general, audio, shortcuts, permissions, updates, about
-        var id: Self { self }
-
-        var title: String {
-            switch self {
-            case .general: "General"
-            case .audio: "Audio"
-            case .shortcuts: "Shortcuts"
-            case .permissions: "Permissions"
-            case .updates: "Updates"
-            case .about: "About"
-            }
-        }
-
-        var symbolName: String {
-            switch self {
-            case .general: "gearshape"
-            case .audio: "speaker.wave.2"
-            case .shortcuts: "command"
-            case .permissions: "lock.shield"
-            case .updates: "arrow.triangle.2.circlepath"
-            case .about: "info.circle"
-            }
-        }
-
-        var accessibilityIdentifier: String {
-            "settings.sidebar.\(rawValue)"
-        }
-    }
-
-    @State private var selection: Section = .general
-    @State private var isCloseButtonHovered = false
-    /// `NavigationSplitView.List(selection:)` requires an optional binding.
-    /// We bridge to the non-optional `selection` so the sidebar never falls
-    /// into a "nothing selected" state — selecting `nil` is silently ignored.
-    private var selectionBinding: Binding<Section?> {
-        Binding(
-            get: { selection },
-            set: { newValue in
-                if let new = newValue { selection = new }
-            }
-        )
-    }
+    // Reopening Settings returns to the last pane, per the HIG.
+    @AppStorage("settings.lastPage") private var selection: SettingsPage = .general
+    @AppStorage("settings.showHelp") private var showHelp = true
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            navigationSplitView
-                // Dedicated 24 pt drag handle at the very top, reserved via
-                // safeAreaInset so it doesn't overlap the sidebar List rows.
-                // Without this strip the borderless panel can't be dragged
-                // (window.isMovableByWindowBackground is intentionally false).
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    WindowDragStrip()
-                        .frame(height: 24)
-                        .frame(maxWidth: .infinity)
+        SettingsLayout(selection: $selection, showHelp: $showHelp, attentionPages: attentionPages) {
+            VStack(alignment: .leading, spacing: 22) {
+                if !accessibility.isTrustedCached {
+                    AccessibilityBanner(accessibility: accessibility)
                 }
-
-            closeButton
-                .padding(.trailing, 22)
-                .padding(.bottom, 16)
-        }
-        .frame(minWidth: 860, minHeight: 580)
-        // Liquid Glass stays the front surface (full vibrancy / reflections).
-        // A faint behind-window blur sits *under* the glass to deepen the
-        // backdrop just a touch — kept at low opacity so the glass look is
-        // preserved rather than flattened into an opaque frosted panel. Glass is
-        // applied first so it layers in front of this blur; tune `opacity`
-        // (and/or the material) for more/less blur. Both sit before `.clipShape`
-        // so they inherit the 22 pt rounded corners.
-        .darkGlassBackground(cornerRadius: 22)
-        .background {
-            VisualEffectBackground(material: .underWindowBackground, blendingMode: .behindWindow)
-                .opacity(0.2)
-                .allowsHitTesting(false)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(DesignTokens.Colors.glassRowBorder, lineWidth: 0.8)
+                selectedContent
+            }
         }
         .preferredColorScheme(settings.appSettings.appearance.swiftUIColorScheme)
         .environment(\.appearancePreference, settings.appSettings.appearance)
         .background(WindowAppearanceBridge(appearance: settings.appSettings.appearance.nsAppearance))
-        .background(SettingsWindowChromeBridge())
-        .overlay(alignment: .topLeading) {
-            uiTestAccessibilityAnchors
-        }
     }
 
-    // MARK: - NavigationSplitView
-
-    /// Native two-column navigation. On macOS 26 the sidebar inherits Liquid
-    /// Glass automatically; on macOS 14/15 it falls back to the conventional
-    /// vibrant sidebar material. Either way the system handles selection
-    /// styling, hover states, and Reduce-Transparency accessibility for us —
-    /// the previous hand-rolled `Button` sidebar reimplemented all of that.
-    private var navigationSplitView: some View {
-        NavigationSplitView {
-            sidebarList
-                .navigationSplitViewColumnWidth(min: 180, ideal: 196, max: 220)
-        } detail: {
-            detailContent
-        }
-        .navigationSplitViewStyle(.balanced)
+    private var attentionPages: Set<SettingsPage> {
+        var pages: Set<SettingsPage> = []
+        if !accessibility.isTrustedCached || mediaKeyStatus.isOffline { pages.insert(.shortcuts) }
+        if !accessibility.isTrustedCached || audioEngine.permission.status != .authorized
+            || notifications.state != .authorized { pages.insert(.permissions) }
+        return pages
     }
 
-    // MARK: - Sidebar
-
-    /// Native `List` with sidebar style. macOS provides the row backgrounds,
-    /// selection highlight, hover state, keyboard navigation (↑↓ + Return),
-    /// and Liquid Glass material on macOS 26. Each row uses `Label` so the
-    /// icon + text alignment matches every other macOS sidebar — plus an
-    /// optional trailing **status dot** that surfaces "this tab needs your
-    /// attention" cues at a glance (currently used for the Shortcuts tab
-    /// when Accessibility isn't granted or the media-key tap is offline).
-    private var sidebarList: some View {
-        List(selection: selectionBinding) {
-            ForEach(Section.allCases) { section in
-                sidebarRow(for: section)
-                    .tag(Section?.some(section))
-                    .accessibilityIdentifier(section.accessibilityIdentifier)
-            }
-        }
-        // Hide the inner scroll background so our outer `darkGlassBackground`
-        // is what reads through — the native sidebar material is then layered
-        // by the system on top of our glass, which is the Apple pattern.
-        .scrollContentBackground(.hidden)
-        .listStyle(.sidebar)
-    }
-
-    /// One sidebar row: native Label + a 6 pt trailing status dot whenever
-    /// the section reports a non-`nil` status color. The dot's accessibility
-    /// label is announced alongside the row title so VoiceOver users hear
-    /// "Shortcuts, needs attention".
-    @ViewBuilder
-    private func sidebarRow(for section: Section) -> some View {
-        HStack(spacing: 6) {
-            Label(section.title, systemImage: section.symbolName)
-            Spacer(minLength: 0)
-            if let dotColor = statusDotColor(for: section) {
-                Circle()
-                    .fill(dotColor)
-                    .frame(width: 6, height: 6)
-                    .accessibilityLabel("Needs attention")
-            }
-        }
-    }
-
-    /// Returns a non-nil color when the given section has a state worth
-    /// flagging. Keeps badge logic centralized so future sections can opt-in
-    /// by adding a case here.
-    private func statusDotColor(for section: Section) -> Color? {
-        switch section {
+    @ViewBuilder private var selectedContent: some View {
+        switch selection {
+        case .general:
+            GeneralTab(settings: settings, onResetAll: {
+                audioEngine.handleSettingsReset()
+                deviceVolumeMonitor.setSystemFollowDefault()
+            })
+        case .appearance:
+            AppearanceTab(settings: settings)
+        case .audio:
+            AudioTab(settings: settings, audioEngine: audioEngine, deviceVolumeMonitor: deviceVolumeMonitor)
         case .shortcuts:
-            // Two failure modes for the media-key feature: missing trust, or
-            // the CGEventTap has gone offline. Both block keys from working,
-            // so both deserve the same orange "your attention is needed" cue.
-            if !accessibility.isTrustedCached || mediaKeyStatus.isOffline {
-                return .orange
-            }
-            return nil
+            ShortcutsTab(settings: settings, accessibility: accessibility, mediaKeyStatus: mediaKeyStatus,
+                         mediaKeyMonitor: mediaKeyMonitor, shortcutsRegistry: shortcutsRegistry)
         case .permissions:
-            // Flag whenever any required permission isn't granted yet.
-            return anyPermissionMissing ? .orange : nil
-        case .general, .audio, .updates, .about:
-            return nil
+            PermissionsTab(accessibility: accessibility, audioPermission: audioEngine.permission, notifications: notifications)
+        case .updates:
+            UpdatesTab(updateManager: updateManager)
+        case .about:
+            AboutTab()
         }
-    }
-
-    /// True if any of the three macOS permissions FineTune relies on is not granted.
-    private var anyPermissionMissing: Bool {
-        !accessibility.isTrustedCached
-            || audioEngine.permission.status != .authorized
-            || notifications.state != .authorized
-    }
-
-    // MARK: - Detail (selected tab content)
-
-    /// Detail column with the active tab's content. We deliberately do NOT
-    /// apply `backgroundExtensionEffect()` here: that modifier is designed
-    /// for media-rich hero content (images extending under a toolbar/sidebar
-    /// for continuity), and on text-heavy settings pages it produces a bug
-    /// where section headers like "Appearance" or "Danger Zone" bleed
-    /// through the sidebar — exactly the artifact the inspector is meant
-    /// to *prevent*.
-    ///
-    /// When Accessibility trust is missing, a persistent banner is pinned
-    /// above the scroll view so the prompt reaches the user on every tab,
-    /// not only Shortcuts. The banner removes itself once trust is granted.
-    @ViewBuilder
-    private var detailContent: some View {
-        VStack(spacing: 0) {
-            if !accessibility.isTrustedCached {
-                AccessibilityBanner(accessibility: accessibility)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 14)
-                    .padding(.bottom, 4)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-
-            scrollContent
-        }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: accessibility.isTrustedCached)
-    }
-
-    private var scrollContent: some View {
-        ScrollView {
-            Group {
-                switch selection {
-                case .general:
-                    GeneralTab(
-                        settings: settings,
-                        onResetAll: {
-                            audioEngine.handleSettingsReset()
-                            deviceVolumeMonitor.setSystemFollowDefault()
-                        }
-                    )
-                case .audio:
-                    AudioTab(
-                        settings: settings,
-                        audioEngine: audioEngine,
-                        deviceVolumeMonitor: deviceVolumeMonitor
-                    )
-                case .shortcuts:
-                    ShortcutsTab(
-                        settings: settings,
-                        accessibility: accessibility,
-                        mediaKeyStatus: mediaKeyStatus,
-                        mediaKeyMonitor: mediaKeyMonitor,
-                        shortcutsRegistry: shortcutsRegistry
-                    )
-                case .permissions:
-                    PermissionsTab(
-                        accessibility: accessibility,
-                        audioPermission: audioEngine.permission,
-                        notifications: notifications
-                    )
-                case .updates:
-                    UpdatesTab(updateManager: updateManager)
-                case .about:
-                    AboutTab()
-                }
-            }
-            .padding(.horizontal, 26)
-            .padding(.vertical, 22)
-            // Bottom padding leaves room for the floating close button so the
-            // last row in any tab is never clipped by it.
-            .padding(.bottom, 40)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
-        .scrollIndicators(.never)
-    }
-
-    // MARK: - Close button (overlay, bottom-right)
-
-    private var closeButton: some View {
-        Button {
-            NSApp.keyWindow?.close()
-        } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 15, weight: .semibold))
-                .symbolRenderingMode(.hierarchical)
-                .frame(width: 46, height: 46)
-                .contentShape(Circle())
-        }
-        // CloseButtonStyle owns the glass + the spin/grow/press animation so the
-        // icon and its glass circle transform together.
-        .buttonStyle(CloseButtonStyle(isHovered: isCloseButtonHovered))
-        // White X on the red glass when hovered; muted at rest.
-        .foregroundStyle(isCloseButtonHovered ? Color.white : DesignTokens.Colors.textSecondary)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.5)) {
-                isCloseButtonHovered = hovering
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityIdentifier("settings.close")
-        .accessibilityLabel("Close Settings")
-    }
-
-    // MARK: - UI test anchors
-
-    /// Invisible 1 pt anchors exposing the section identifiers at predictable
-    /// locations for UI tests. The native sidebar rows also carry their own
-    /// `.accessibilityIdentifier`, but these anchors guarantee a stable hook
-    /// even if SwiftUI's accessibility tree shifts between OS releases.
-    private var uiTestAccessibilityAnchors: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text("settings.root")
-                .accessibilityIdentifier("settings.root")
-            Text("settings.sidebar.general")
-                .accessibilityIdentifier("settings.sidebar.general")
-            Text("settings.sidebar.audio")
-                .accessibilityIdentifier("settings.sidebar.audio")
-            Text("settings.sidebar.shortcuts")
-                .accessibilityIdentifier("settings.sidebar.shortcuts")
-        }
-        .font(.system(size: 1))
-        .foregroundStyle(.clear)
-        .frame(width: 1, height: 1, alignment: .topLeading)
-        .clipped()
     }
 }
 
-// MARK: - Close button glass modifier
+// The layout is independent of the audio services so previews use the same UI.
+enum SettingsPage: String, CaseIterable, Identifiable {
+    case general, appearance, audio, shortcuts, permissions, updates, about
+    var id: Self { self }
 
-/// macOS 26 uses native interactive Liquid Glass (scales/bounces on press,
-/// shimmers on hover). On macOS 14/15 we keep the prior ultraThinMaterial
-/// + hover-scale fallback so the button still feels lifted.
-private struct CloseButtonGlassModifier: ViewModifier {
-    let isHovered: Bool
+    var title: String {
+        switch self {
+        case .general: "Application"
+        case .appearance: "Appearance"
+        case .audio: "Audio"
+        case .shortcuts: "Keyboard"
+        case .permissions: "Permissions"
+        case .updates: "Updates"
+        case .about: "About"
+        }
+    }
 
-    /// macOS "close" traffic-light coral (#FF5F57).
-    private var closeRed: Color { Color(red: 1.0, green: 0.373, blue: 0.341) }
+    var symbol: String {
+        switch self {
+        case .general: "switch.2"
+        case .appearance: "macwindow"
+        case .audio: "speaker.wave.2"
+        case .shortcuts: "keyboard"
+        case .permissions: "lock.shield"
+        case .updates: "arrow.down.circle"
+        case .about: "tag"
+        }
+    }
 
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content
-                .glassEffect(
-                    isHovered ? .regular.tint(closeRed).interactive() : .regular.interactive(),
-                    in: .circle
-                )
-        } else {
-            content
-                // On hover the circle fills coral over the material; at rest it's
-                // just the frosted glass.
-                .background(isHovered ? closeRed.opacity(0.92) : Color.clear, in: Circle())
-                .background(.ultraThinMaterial, in: Circle())
+    var subtitle: String {
+        switch self {
+        case .general: "Startup, notifications and your saved preferences"
+        case .appearance: "Make FineTune feel at home on your Mac"
+        case .audio: "Volume, devices and audio processing"
+        case .shortcuts: "Media keys and shortcuts for everyday control"
+        case .permissions: "Manage FineTune’s access to macOS features"
+        case .updates: "Your installed version and software updates"
+        case .about: "FineTune for macOS"
+        }
+    }
+}
+
+@MainActor
+struct SettingsLayout<Content: View>: View {
+    @Binding var selection: SettingsPage
+    @Binding var showHelp: Bool
+    var attentionPages: Set<SettingsPage> = []
+    @ViewBuilder var content: () -> Content
+    @FocusState private var focusedPage: SettingsPage?
+
+    var body: some View {
+        SettingsGlassContainer {
+            settingsColumns
+        }
+        .frame(minWidth: 920, minHeight: 640)
+        .background(SettingsStyle.header)
+        .environment(\.settingsShowsHelp, showHelp)
+        .ignoresSafeArea(.container, edges: .top)
+        .background(SettingsWindowChromeBridge(title: selection.title))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("settings.root")
+    }
+
+    private var settingsColumns: some View {
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: 220)
+                .padding(10)
+            VStack(spacing: 0) {
+                pageHeader
+                ScrollView {
+                    content()
+                        .frame(maxWidth: 820, alignment: .leading)
+                        .padding(26)
+                        .frame(maxWidth: .infinity, alignment: .top)
+                }
+                .id(selection)
+                .scrollIndicators(.automatic)
+                .contentMargins(.vertical, 16, for: .scrollIndicators)
+                .background(SettingsStyle.canvas)
+                .clipShape(RoundedRectangle(cornerRadius: 22))
                 .overlay {
-                    Circle()
-                        .strokeBorder(
-                            isHovered
-                                ? closeRed.opacity(0.9)
-                                : DesignTokens.Colors.glassRowBorderHover,
-                            lineWidth: 0.7
-                        )
+                    RoundedRectangle(cornerRadius: 22)
+                        .strokeBorder(SettingsStyle.border, lineWidth: 1)
+                        .allowsHitTesting(false)
                 }
-                .scaleEffect(isHovered ? 1.08 : 1.0)
+                .padding(.trailing, 10)
+                .padding(.bottom, 10)
+            }
         }
     }
-}
 
-/// Animated button style for the Settings close control: on hover the X spins a
-/// springy quarter-turn and grows while the glass circle lights up; on press the
-/// whole control dips and snaps back. The glass lives here (not as an outer
-/// modifier) so the icon and circle scale as one.
-private struct CloseButtonStyle: ButtonStyle {
-    let isHovered: Bool
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            // Space for the actual macOS close/minimize/zoom controls.
+            WindowDragStrip().frame(height: 56)
+            VStack(spacing: 5) {
+                ForEach(SettingsPage.allCases) { page in
+                    Button {
+                        selection = page
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: page.symbol)
+                                .font(.system(size: 18, weight: .regular))
+                                .foregroundStyle(.tint)
+                                .frame(width: 26)
+                            Text(page.title)
+                                .font(.system(.body, weight: selection == page ? .medium : .regular))
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 0)
+                            if attentionPages.contains(page) {
+                                Circle().fill(.orange).frame(width: 6, height: 6)
+                                    .accessibilityLabel("Needs attention")
+                            }
+                        }
+                        .padding(.horizontal, 13)
+                        .frame(height: 42)
+                        .background(selection == page ? SettingsStyle.selection : .clear,
+                                    in: RoundedRectangle(cornerRadius: 11))
+                        .contentShape(RoundedRectangle(cornerRadius: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .focused($focusedPage, equals: page)
+                    .accessibilityIdentifier("settings.sidebar.\(page.rawValue)")
+                    .accessibilityAddTraits(selection == page ? .isSelected : [])
+                }
+            }
+            .onMoveCommand { direction in
+                let pages = SettingsPage.allCases
+                guard let index = pages.firstIndex(of: focusedPage ?? selection) else { return }
+                let next: Int
+                switch direction {
+                case .up: next = max(0, index - 1)
+                case .down: next = min(pages.count - 1, index + 1)
+                default: return
+                }
+                selection = pages[next]
+                focusedPage = pages[next]
+            }
+            .padding(.horizontal, 10)
+            Spacer(minLength: 30)
+            Toggle("Show help", isOn: $showHelp)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.callout)
+                .padding(.horizontal, 22)
+                .padding(.bottom, 18)
+                .accessibilityIdentifier("settings.showHelp")
+            Divider()
+            HStack(spacing: 8) {
+                Image(systemName: "waveform").foregroundStyle(.tint)
+                Text("FineTune").fontWeight(.medium)
+                Spacer()
+                Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.subheadline)
+            .padding(18)
+        }
+        .modifier(SettingsNavigationSurface(cornerRadius: 22, fallback: SettingsStyle.sidebar))
+    }
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .rotationEffect(.degrees(isHovered ? 90 : 0))
-            .scaleEffect(isHovered ? 1.16 : 1.0)
-            .modifier(CloseButtonGlassModifier(isHovered: isHovered))
-            .scaleEffect(configuration.isPressed ? 0.86 : 1.0)
-            .animation(.spring(response: 0.34, dampingFraction: 0.5), value: isHovered)
-            .animation(.spring(response: 0.24, dampingFraction: 0.55), value: configuration.isPressed)
+    private var pageHeader: some View {
+        WindowDragStrip()
+            // Keep the 136 pt header allocation while insetting its glass surface.
+            .frame(height: 116)
+            .overlay {
+                VStack(spacing: 8) {
+                    Image(systemName: selection.symbol)
+                        .font(.system(size: 34, weight: .regular))
+                        .foregroundStyle(.tint)
+                    Text(selection.title)
+                        .font(.system(.title3, weight: .semibold))
+                    Text(selection.subtitle)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 14)
+                .allowsHitTesting(false)
+            }
+            .modifier(SettingsNavigationSurface(cornerRadius: 22, fallback: SettingsStyle.sidebar))
+            .padding(.vertical, 10)
+            .padding(.trailing, 10)
     }
 }
-
-// MARK: - Window chrome bridge
 
 private struct SettingsWindowChromeBridge: NSViewRepresentable {
-    func makeNSView(context: Context) -> SettingsWindowChromeView {
-        SettingsWindowChromeView()
-    }
+    let title: String
 
+    func makeNSView(context: Context) -> SettingsWindowChromeView { SettingsWindowChromeView() }
     func updateNSView(_ nsView: SettingsWindowChromeView, context: Context) {
+        nsView.title = title
         nsView.apply()
     }
 }
 
 private final class SettingsWindowChromeView: NSView {
+    private var trafficLights: [NSButton] = []
+    private var trafficLightLayoutScheduled = false
+    var title = "FineTune Settings"
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil {
+            NotificationCenter.default.removeObserver(self)
+            trafficLights.removeAll()
+        }
         apply()
+    }
+
+    override func layout() {
+        super.layout()
+        positionTrafficLights()
     }
 
     func apply() {
         guard let window else { return }
-        window.title = ""
+        window.title = title
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.styleMask.insert(.fullSizeContentView)
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.toolbar = nil
+        window.styleMask.formUnion([.titled, .closable, .resizable, .fullSizeContentView])
         window.titlebarSeparatorStyle = .none
-        // Disabled so that clicks on toggles/buttons are NOT swallowed by the
-        // window-drag gesture. The SwiftUI WindowDragStrip at the top of the
-        // view hierarchy provides a dedicated drag handle instead.
+        // Reserve a native titlebar tall enough for the inset traffic lights.
+        let toolbarID = NSToolbar.Identifier("FineTune.Settings")
+        if window.toolbar?.identifier != toolbarID {
+            let toolbar = NSToolbar(identifier: toolbarID)
+            toolbar.allowsUserCustomization = false
+            window.toolbar = toolbar
+        }
+        if window.toolbarStyle != .unified { window.toolbarStyle = .unified }
+        window.backgroundColor = .windowBackgroundColor
+        window.isOpaque = true
+        window.hasShadow = true
         window.isMovableByWindowBackground = false
-        window.standardWindowButton(.closeButton)?.isHidden = true
-        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        window.standardWindowButton(.zoomButton)?.isHidden = true
+        window.standardWindowButton(.closeButton)?.isHidden = false
+        window.standardWindowButton(.closeButton)?.setAccessibilityIdentifier("settings.close")
+        // Settings reopens instantly with ⌘, so minimize and zoom stay dimmed (HIG).
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = false
+        window.standardWindowButton(.miniaturizeButton)?.isEnabled = false
+        window.standardWindowButton(.zoomButton)?.isHidden = false
+        window.standardWindowButton(.zoomButton)?.isEnabled = false
+        observeTrafficLights(in: window)
+        scheduleTrafficLightLayout()
+    }
 
-        clearAppKitChrome(window)
-
-        DispatchQueue.main.async { [weak self, weak window] in
-            guard let self, let window else { return }
-            self.clearAppKitChrome(window)
+    private func observeTrafficLights(in window: NSWindow) {
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+            .compactMap { window.standardWindowButton($0) }
+        guard trafficLights.count != buttons.count
+                || !zip(trafficLights, buttons).allSatisfy({ $0 === $1 }) else { return }
+        NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: nil)
+        trafficLights = buttons
+        for button in buttons {
+            button.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(scheduleTrafficLightLayout),
+                name: NSView.frameDidChangeNotification, object: button
+            )
         }
     }
 
-    private func clearAppKitChrome(_ window: NSWindow) {
-        window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
-        window.contentView?.superview?.wantsLayer = true
-        window.contentView?.superview?.layer?.backgroundColor = NSColor.clear.cgColor
+    @objc private func scheduleTrafficLightLayout() {
+        guard !trafficLightLayoutScheduled else { return }
+        trafficLightLayoutScheduled = true
+        // AppKit can reset the standard frames during titlebar layout. Reapply
+        // after that pass, without changing button targets or moving view parents.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.trafficLightLayoutScheduled = false
+            self.positionTrafficLights()
+        }
+    }
+
+    private func positionTrafficLights() {
+        guard let window, !window.styleMask.contains(.fullScreen),
+              let frameView = window.contentView?.superview else { return }
+        // The sidebar starts 10 pt inside the window. Leave another 14 pt of
+        // space inside its curved edge, matching the reference's inset controls.
+        let inset: CGFloat = 24
+        for (index, button) in trafficLights.enumerated() {
+            guard let parent = button.superview else { continue }
+            let rect = NSRect(x: inset + CGFloat(index) * 23,
+                              y: frameView.bounds.maxY - inset - button.frame.height,
+                              width: button.frame.width, height: button.frame.height)
+            let target = parent.convert(rect, from: frameView)
+            if button.frame.origin != target.origin { button.setFrameOrigin(target.origin) }
+        }
     }
 }
 
-// MARK: - Window Drag Strip
-
-/// Transparent NSView that initiates window dragging on mouse-down.
-/// Used in place of `isMovableByWindowBackground = true` so that interactive
-/// controls (Toggle, Button, Picker) respond normally to clicks — the drag
-/// behavior is confined to this dedicated strip at the top of the window.
-private final class _DragStripView: NSView {
+private final class SettingsDragView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
-    override func mouseDown(with event: NSEvent) {
-        window?.performDrag(with: event)
-    }
+    override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
 }
 
 private struct WindowDragStrip: NSViewRepresentable {
-    func makeNSView(context: Context) -> _DragStripView { _DragStripView() }
-    func updateNSView(_ nsView: _DragStripView, context: Context) {}
+    func makeNSView(context: Context) -> SettingsDragView { SettingsDragView() }
+    func updateNSView(_ nsView: SettingsDragView, context: Context) {}
 }

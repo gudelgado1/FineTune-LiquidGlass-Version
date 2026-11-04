@@ -14,17 +14,22 @@ import os
 // THREAD SAFETY: ensureLoaded() must only be called from ddcQueue (serial).
 // This constraint is currently enforced by all callers going through
 // discoverServices() which runs on ddcQueue.
-enum IOAVServiceLoader {
+/// `nonisolated` for the same reason as `DDCService`: these wrap C entry points
+/// invoked from the DDC background queue, so inheriting the project's default
+/// `@MainActor` would make every call an isolation violation.
+nonisolated enum IOAVServiceLoader {
     typealias CreateWithServiceFn = @convention(c) (CFAllocator?, io_service_t) -> Unmanaged<CFTypeRef>?
     typealias ReadI2CFn = @convention(c) (CFTypeRef, UInt32, UInt32, UnsafeMutablePointer<UInt8>, UInt32) -> IOReturn
     typealias WriteI2CFn = @convention(c) (CFTypeRef, UInt32, UInt32, UnsafePointer<UInt8>, UInt32) -> IOReturn
 
-    private static var createFn: CreateWithServiceFn?
-    private static var readFn: ReadI2CFn?
-    private static var writeFn: WriteI2CFn?
-    private static var didLoad = false
+    private nonisolated(unsafe) static var createFn: CreateWithServiceFn?
+    private nonisolated(unsafe) static var readFn: ReadI2CFn?
+    private nonisolated(unsafe) static var writeFn: WriteI2CFn?
+    // Written once on first use from the DDC queue, read-only afterwards.
+    private nonisolated(unsafe) static var didLoad = false
 
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "DDCService")
+    // `Logger` is Sendable; the annotation just opts out of the default isolation.
+    private nonisolated static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "DDCService")
 
     static func ensureLoaded() -> Bool {
         guard !didLoad else { return createFn != nil }
@@ -85,7 +90,11 @@ enum DDCError: Error {
 /// Handles DDC/CI I2C communication with a single display.
 /// Protocol implementation matches MonitorControl (Arm64DDC.swift).
 /// All methods are synchronous and should be called from a background queue.
-final class DDCService: @unchecked Sendable {
+///
+/// Explicitly `nonisolated`: the project defaults types to `@MainActor`, and
+/// inheriting that here would make every call from `ddcQueue` an isolation
+/// violation — the exact defect behind the upstream crash on DDC volume changes.
+nonisolated final class DDCService: @unchecked Sendable {
     private let service: CFTypeRef
 
     // I2C addressing (DDC/CI standard)
@@ -136,15 +145,22 @@ final class DDCService: @unchecked Sendable {
 
     /// Writes a DDC packet without reading a response.
     private func i2cWrite(packet: [UInt8]) throws {
+        // Send EVERY configured write cycle instead of stopping at the first
+        // success: some displays only apply the second write, so returning early
+        // left the volume unchanged on them. Matching `i2cWriteRead` above, any
+        // cycle succeeding counts as success — a later cycle erroring doesn't
+        // undo a value the display already took (ronitsingh10/FineTune#362).
+        var lastResult: IOReturn = kIOReturnError
+        var anySucceeded = false
         for _ in 0..<numWriteCycles {
             usleep(writeSleepTime)
-            let result = packet.withUnsafeBufferPointer { buf in
+            lastResult = packet.withUnsafeBufferPointer { buf in
                 IOAVServiceLoader.writeI2C(service: service, chipAddress: chipAddress,
                                            dataAddress: writeAddress, buffer: buf.baseAddress!, size: UInt32(buf.count))
             }
-            if result == kIOReturnSuccess { return }
+            if lastResult == kIOReturnSuccess { anySucceeded = true }
         }
-        throw DDCError.writeFailed(kIOReturnError)
+        guard anySucceeded else { throw DDCError.writeFailed(lastResult) }
     }
 
     // MARK: - VCP Commands
@@ -305,7 +321,8 @@ final class DDCService: @unchecked Sendable {
 extension DDCService {
     /// Finds all DCPAVServiceProxy entries in the IORegistry and creates DDCService instances.
     /// Returns pairs of (io_service_t entry, DDCService).
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "DDCService")
+    // `Logger` is Sendable; the annotation just opts out of the default isolation.
+    private nonisolated static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "DDCService")
 
     static func discoverServices() -> [(entry: io_service_t, service: DDCService)] {
         guard IOAVServiceLoader.ensureLoaded() else {

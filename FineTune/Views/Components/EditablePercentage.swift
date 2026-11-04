@@ -10,6 +10,11 @@ struct EditablePercentage: View {
     var onCommit: ((Int) -> Void)? = nil
     /// Called with `true` when the text field becomes active, `false` when it dismisses.
     var onEditingChanged: ((Bool) -> Void)? = nil
+    /// True when this row is the popup's keyboard selection. Gates keyboard entry
+    /// so a typed digit only ever lands on the row the user is looking at.
+    var isRowFocused: Bool = false
+    /// Popup-owned channel for digits typed while this row is focused.
+    var textEntry: PopupTextEntryCoordinator? = nil
 
     @State private var isEditing = false
     @State private var inputText = ""
@@ -46,6 +51,10 @@ struct EditablePercentage: View {
                     .font(DesignTokens.Typography.percentage)
                     .foregroundStyle(isHovered ? DesignTokens.Colors.textPrimary : textColor)
             }
+        }
+        .onChange(of: textEntry?.nonce) { _, _ in
+            guard let digit = textEntry?.pendingDigit else { return }
+            consumeTypedDigit(digit)
         }
         .padding(.horizontal, isEditing ? 6 : 4)
         .padding(.vertical, isEditing ? 2 : 1)
@@ -96,8 +105,22 @@ struct EditablePercentage: View {
         .animation(.easeOut(duration: 0.1), value: isHovered)
     }
 
-    private func startEditing() {
-        inputText = "\(percentage)"
+    /// Starts (or extends) an edit from a digit typed on the focused row.
+    private func consumeTypedDigit(_ digit: String) {
+        guard isRowFocused else { return }
+        if isEditing {
+            // Mid-edit: append, so typing 4 then 5 reads as 45 rather than 5.
+            inputText += digit
+        } else {
+            // Replace rather than append: typing over a focused row is a fresh
+            // value, matching how the native volume fields behave.
+            startEditing(seededWith: digit)
+        }
+        textEntry?.clear()
+    }
+
+    private func startEditing(seededWith seed: String? = nil) {
+        inputText = seed ?? "\(percentage)"
         isEditing = true
 
         // Install monitors via coordinator (handles local, global, and app deactivation)

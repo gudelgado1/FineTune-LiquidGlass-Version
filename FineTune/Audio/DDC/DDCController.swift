@@ -81,14 +81,22 @@ final class DDCController {
             settingsManager.setDDCVolume(for: uid, to: clamped)
         }
 
-        // Debounce DDC write
+        // Debounce DDC write.
+        //
+        // The work item must be @Sendable and must NOT capture `self`: this class
+        // is @MainActor, so a closure written here inherits that isolation and
+        // then violates it when the item runs on `ddcQueue`. Under Swift 6 the
+        // executor check turns that into a hard trap — the crash upstream saw on
+        // every DDC volume change (ronitsingh10/FineTune#361). Capturing the
+        // logger by value keeps the closure isolation-free.
         debounceTimers[deviceID]?.cancel()
         let service = services[deviceID]
-        let item = DispatchWorkItem { [weak self] in
+        let logger = self.logger
+        let item = DispatchWorkItem { @Sendable in
             do {
                 try service?.setAudioVolume(clamped)
             } catch {
-                self?.logger.error("DDC write failed for device \(deviceID): \(error)")
+                logger.error("DDC write failed for device \(deviceID): \(error)")
             }
         }
         debounceTimers[deviceID] = item

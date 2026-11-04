@@ -36,6 +36,8 @@ struct InactiveAppRow: View {
     let isEQExpanded: Bool
     let onEQToggle: () -> Void
     let isFocused: Bool
+    /// Uses the same percentage editor as active app rows.
+    let textEntry: PopupTextEntryCoordinator?
     let isMediaTarget: Bool
     let onToggleMediaTarget: () -> Void
 
@@ -71,6 +73,7 @@ struct InactiveAppRow: View {
         isEQExpanded: Bool = false,
         onEQToggle: @escaping () -> Void = {},
         isFocused: Bool = false,
+        textEntry: PopupTextEntryCoordinator? = nil,
         isMediaTarget: Bool = false,
         onToggleMediaTarget: @escaping () -> Void = {}
     ) {
@@ -102,6 +105,7 @@ struct InactiveAppRow: View {
         self.isEQExpanded = isEQExpanded
         self.onEQToggle = onEQToggle
         self.isFocused = isFocused
+        self.textEntry = textEntry
         self.isMediaTarget = isMediaTarget
         self.onToggleMediaTarget = onToggleMediaTarget
         self._localEQSettings = State(initialValue: eqSettings)
@@ -133,7 +137,7 @@ struct InactiveAppRow: View {
                             .foregroundStyle(DesignTokens.Colors.textPrimary)
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(
                                 isEQExpanded
                                     ? DesignTokens.Colors.accentPrimary
@@ -151,7 +155,7 @@ struct InactiveAppRow: View {
                         mode: deviceSelectionMode
                     ) {
                         Text(subtitle)
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(DesignTokens.Colors.textTertiary)
                             .lineLimit(1)
                     }
@@ -181,6 +185,8 @@ struct InactiveAppRow: View {
                     boost: boost,
                     isEQExpanded: isEQExpanded,
                     isParentHovered: isRowHovered,
+                    isRowFocused: isFocused,
+                    textEntry: textEntry,
                     onVolumeChange: onVolumeChange,
                     onMuteChange: onMuteChange,
                     onBoostChange: onBoostChange,
@@ -198,11 +204,11 @@ struct InactiveAppRow: View {
                 settings: $localEQSettings,
                 userPresets: userPresets,
                 onPresetSelected: { preset in
-                    localEQSettings = preset.settings
-                    onEQChange(preset.settings)
+                    localEQSettings = localEQSettings.applyingCurve(from: preset.settings)
+                    onEQChange(localEQSettings)
                 },
                 onUserPresetSelected: { userPreset in
-                    localEQSettings = userPreset.settings
+                    localEQSettings = localEQSettings.applyingCurve(from: userPreset.settings)
                     onUserPresetSelected(userPreset)
                 },
                 onSettingsChanged: { settings in

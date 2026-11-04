@@ -35,7 +35,10 @@ final class AutoEQProfileManager {
         for profile in imported {
             profiles[profile.id] = profile
         }
+        rebuildSearchIndex()
 
+        // Unit tests use their own profiles and never start background network work.
+        guard !AppDataLocations.isUnitTesting else { return }
         // Load catalog from cache/GitHub
         Task { @MainActor in
             await self.fetcher.loadCatalog()
@@ -47,6 +50,20 @@ final class AutoEQProfileManager {
 
     var catalogState: AutoEQFetcher.FetchState { fetcher.catalogState }
     var catalogEntries: [AutoEQCatalogEntry] { fetcher.catalog }
+
+    /// An explicit Browse action loads the catalog; app startup remains isolated in tests.
+    func loadCatalogForBrowsing(retry: Bool = false) async {
+        guard fetcher.catalogState != .loading else { return }
+        if retry { await fetcher.refreshCatalogFromGitHub() }
+        else { await fetcher.loadCatalog() }
+        rebuildSearchIndex()
+    }
+
+    /// Includes imported profiles, even while the online catalog is unavailable.
+    func refreshBrowserEntries() -> [AutoEQCatalogEntry] {
+        rebuildSearchIndex()
+        return sortedEntries
+    }
 
     func catalogEntry(for id: String) -> AutoEQCatalogEntry? {
         fetcher.catalog.first(where: { $0.id == id })
@@ -60,15 +77,6 @@ final class AutoEQProfileManager {
         profiles[profile.id] = profile
         rebuildSearchIndex()
         return profile
-    }
-
-    /// Delete an imported profile from disk and catalog.
-    func deleteImportedProfile(id: String) {
-        guard let profile = profiles[id], profile.source == .imported else { return }
-        profiles.removeValue(forKey: id)
-        loader.deleteProfileFiles(id: id)
-        rebuildSearchIndex()
-        logger.info("Deleted imported profile: \(profile.name)")
     }
 
     // MARK: - Profile Resolution
@@ -103,6 +111,15 @@ final class AutoEQProfileManager {
             logger.error("Failed to fetch profile \(entry.name): \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// Resolve only data already on this Mac, before IO begins. Fetched profiles
+    /// otherwise depend on the background catalog task finishing after launch.
+    func profileForActivation(for id: String) -> AutoEQProfile? {
+        if let profile = profiles[id] { return profile }
+        guard let cached = fetcher.cachedProfile(for: id) else { return nil }
+        profiles[id] = cached
+        return cached
     }
 
     /// Look up a profile by ID (only returns already-loaded profiles).

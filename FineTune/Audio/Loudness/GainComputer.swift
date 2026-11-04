@@ -2,7 +2,7 @@ import Foundation
 
 /// Computes the desired gain in dB given a smoothed loudness level.
 /// Pure, stateless value type — RT-safe.
-struct GainComputer: Sendable {
+nonisolated struct GainComputer: Sendable {
     let settings: LoudnessEqualizerSettings
 
     /// Returns the desired gain (dB) for a wideband leveler that boosts quiet material

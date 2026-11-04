@@ -115,7 +115,7 @@ private struct SampleRatePickerValue: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(DesignTokens.Colors.textPrimary)
             Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(DesignTokens.Colors.textSecondary)
         }
         .padding(.horizontal, DesignTokens.Spacing.sm)

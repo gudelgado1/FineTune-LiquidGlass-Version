@@ -11,17 +11,12 @@ struct ShortcutsTab: View {
     let shortcutsRegistry: ShortcutsRegistry
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                volumeSection
-                mediaKeysSection
-                hotkeysSection
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 24) {
+            volumeSection
+            mediaKeysSection
+            hotkeysSection
         }
-        .scrollIndicators(.never)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onChange(of: settings.appSettings.mediaKeyControlEnabled) { _, _ in
             mediaKeyMonitor.reconcile()
         }
@@ -107,7 +102,7 @@ struct ShortcutsTab: View {
                 SettingsRowDivider()
                 SettingsRow(
                     "HUD Style",
-                    description: "How the volume indicator appears"
+                    description: "Capsule shows a compact volume bar. Classic shows the square volume indicator."
                 ) {
                     HUDStyleSegmentedControl(selection: $settings.appSettings.hudStyle)
                 }
@@ -177,7 +172,7 @@ private struct HotkeyRow: View {
                         refreshTick &+= 1
                     } label: {
                         Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(.caption, weight: .semibold))
                             .foregroundStyle(
                                 isResetHovered
                                     ? Color.primary

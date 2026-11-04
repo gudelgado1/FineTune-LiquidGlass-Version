@@ -72,7 +72,7 @@ struct AboutTab: View {
                 .foregroundStyle(.secondary)
 
             Text("Per-app audio control for macOS")
-                .font(.system(size: 11))
+                .font(.subheadline)
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
         }
@@ -115,11 +115,11 @@ struct AboutTab: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(showAcknowledgments ? 90 : 0))
                     Text("Built with")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(.subheadline, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -144,21 +144,21 @@ struct AboutTab: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: ack.icon)
-                    .font(.system(size: 10))
+                    .font(.caption)
                     .foregroundStyle(.tertiary)
                     .frame(width: 14)
                 Text(ack.name)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.subheadline, weight: .medium))
                     .foregroundStyle(DesignTokens.Colors.textSecondary)
                 Text("·")
                     .foregroundStyle(.tertiary)
                 Text(ack.role)
-                    .font(.system(size: 10))
+                    .font(.caption)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                 Spacer()
                 Image(systemName: "arrow.up.right.square")
-                    .font(.system(size: 9))
+                    .font(.caption)
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10)
@@ -185,7 +185,7 @@ struct AboutTab: View {
             Text("·")
             Text("Made with ❤️ for macOS")
         }
-        .font(.system(size: 10))
+        .font(.caption)
         .foregroundStyle(.tertiary)
     }
 }

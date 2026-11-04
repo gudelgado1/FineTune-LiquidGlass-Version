@@ -49,6 +49,7 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "AudioDeviceMonitor")
 
+    private var listenerLifetime = UUID()
     private var deviceListListenerBlock: AudioObjectPropertyListenerBlock?
     private var deviceListAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDevices,
@@ -74,9 +75,11 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
 
         refresh()
 
+        let lifetime = listenerLifetime
         deviceListListenerBlock = { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                self?.scheduleDeviceListRefresh()
+                guard let self, self.listenerLifetime == lifetime else { return }
+                self.scheduleDeviceListRefresh()
             }
         }
 
@@ -93,13 +96,14 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
     }
 
     func stop() {
+        listenerLifetime = UUID()
         logger.debug("Stopping audio device monitor")
 
         deviceListDebounceTask?.cancel()
         deviceListDebounceTask = nil
 
         if let block = deviceListListenerBlock {
-            AudioObjectRemovePropertyListenerBlock(.system, &deviceListAddress, .main, block)
+            HALListenerRetirement.remove(.system, address: deviceListAddress, block: block)
             deviceListListenerBlock = nil
         }
         removeAllDataSourceListeners()
@@ -226,9 +230,11 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
                 mScope: kAudioObjectPropertyScopeOutput,
                 mElement: kAudioObjectPropertyElementMain
             )
+            let lifetime = listenerLifetime
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 Task { @MainActor [weak self] in
-                    self?.scheduleDeviceListRefresh()
+                    guard let self, self.listenerLifetime == lifetime else { return }
+                    self.scheduleDeviceListRefresh()
                 }
             }
             let status = AudioObjectAddPropertyListenerBlock(deviceID, &address, .main, block)
@@ -242,16 +248,12 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
 
     private func removeDataSourceListener(for deviceID: AudioDeviceID) {
         guard let block = dataSourceListeners.removeValue(forKey: deviceID) else { return }
-        var address = AudioObjectPropertyAddress(
+        let address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDataSource,
             mScope: kAudioObjectPropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        let status = AudioObjectRemovePropertyListenerBlock(deviceID, &address, .main, block)
-        // Tolerate kAudioHardwareBadObjectError (-66680): device was already destroyed
-        if status != noErr && status != OSStatus(kAudioHardwareBadObjectError) {
-            logger.warning("Failed to remove data source listener for device \(deviceID): \(status)")
-        }
+        HALListenerRetirement.remove(deviceID, address: address, block: block)
     }
 
     private func removeAllDataSourceListeners() {

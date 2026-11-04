@@ -2,8 +2,8 @@
 // Tests for HUDWindowController: position math, hide-timer reset semantics,
 // style-specific hide delay, and popup-guard behavior.
 //
-// NSPanel/NSScreen creation is avoided — position math is tested via the pure
-// static method, and timer behavior is tested via the hideDelayOverride hook.
+// Position tests are pure. The controller tests create AppKit panels; actual
+// focus, mouse delivery and timer behavior are covered in HUDInteractionTests.
 
 import Testing
 import Foundation
@@ -18,7 +18,7 @@ struct HUDWindowControllerPositionTests {
 
     // MARK: - Tahoe style
 
-    @Test("Tahoe style places HUD at top-right, inset 8pt from edges (AC #16)")
+    @Test("Tahoe style places HUD at top-right compositor envelope (AC #16)")
     func tahoeTopRight() {
         let size = NSSize(width: 300, height: 72)
         let pt = HUDWindowController.computePosition(
@@ -27,8 +27,8 @@ struct HUDWindowControllerPositionTests {
             visibleFrame: screen,
             suppressionDegraded: false
         )
-        let expectedX = screen.maxX - size.width - 8
-        let expectedY = screen.maxY - size.height - 8
+        let expectedX = screen.maxX - size.width
+        let expectedY = screen.maxY - size.height
         #expect(pt.x == expectedX)
         #expect(pt.y == expectedY)
     }
@@ -43,7 +43,7 @@ struct HUDWindowControllerPositionTests {
             suppressionDegraded: true
         )
         let expectedX = screen.minX + screen.width * 0.25 - size.width / 2
-        let expectedY = screen.maxY - size.height - 8
+        let expectedY = screen.maxY - size.height
         #expect(pt.x == expectedX)
         #expect(pt.y == expectedY)
     }
@@ -65,7 +65,7 @@ struct HUDWindowControllerPositionTests {
                 suppressionDegraded: true
             )
             #expect(pt.x == vf.minX + vf.width * 0.25 - size.width / 2)
-            #expect(pt.y == vf.maxY - size.height - 8)
+            #expect(pt.y == vf.maxY - size.height)
         }
     }
 
@@ -106,7 +106,7 @@ struct HUDWindowControllerPositionTests {
 
     // MARK: - Edge cases
 
-    @Test("Tahoe with zero-size HUD lands at top-right corner minus 8pt")
+    @Test("Tahoe with zero-size HUD lands at top-right corner")
     func tahoeZeroSize() {
         let size = NSSize.zero
         let pt = HUDWindowController.computePosition(
@@ -115,8 +115,8 @@ struct HUDWindowControllerPositionTests {
             visibleFrame: screen,
             suppressionDegraded: false
         )
-        #expect(pt.x == screen.maxX - 8)
-        #expect(pt.y == screen.maxY - 8)
+        #expect(pt.x == screen.maxX)
+        #expect(pt.y == screen.maxY)
     }
 }
 
@@ -134,7 +134,9 @@ struct HUDWindowControllerTimerTests {
         let popup = PopupVisibilityService()
         popup.isVisible = popupVisible
         let hud = HUDWindowController(settingsManager: settings, mediaKeyStatus: status, popupVisibility: popup)
-        // Stub out frame to avoid real NSScreen in tests.
+        hud.fullscreenProvider = { false }
+        hud.observesOutsideClicks = false
+        // Supply deterministic geometry without relying on the foreground app.
         hud.frameProvider = { NSRect(x: 0, y: 23, width: 1440, height: 877) }
         return hud
     }

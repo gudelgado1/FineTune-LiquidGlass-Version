@@ -36,7 +36,7 @@ struct AboutLinkChip: View {
         if isPrimary {
             return hoverColor.opacity(isHovered ? 0.18 : 0.12)
         }
-        return isHovered ? Color.white.opacity(0.06) : Color.clear
+        return isHovered ? DesignTokens.Colors.hoverSurface : Color.clear
     }
 
     private var resolvedBorder: Color {
@@ -52,11 +52,11 @@ struct AboutLinkChip: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: resolvedIcon)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.subheadline, weight: .medium))
                     .foregroundStyle(resolvedIconColor)
                     .contentTransition(.symbolEffect(.replace))
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.subheadline, weight: .medium))
                     .foregroundStyle(resolvedTextColor)
             }
             .padding(.horizontal, 10)

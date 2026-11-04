@@ -7,8 +7,7 @@ final class AutoEQProfileLoader {
     private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "AutoEQProfileLoader")
 
     private var importDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("FineTune")
+        AppDataLocations.applicationSupport
             .appendingPathComponent("AutoEQ")
     }
 

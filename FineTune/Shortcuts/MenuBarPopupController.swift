@@ -13,7 +13,9 @@ import os
 /// machinery. The technique is package-agnostic and avoids needing any callback
 /// wiring (no `onStatusItemReady`, no Scene-reference capture).
 ///
-/// Once the status item is located, we toggle the popup by posting a synthetic
+/// Production uses the bound popup action first. The discovery path remains a
+/// fallback for an unbound controller and older callers.
+/// Once the status item is located, the fallback toggles by posting a synthetic
 /// `.leftMouseDown` event aimed at the button's window. `FluidMenuBarExtra`
 /// installs a `LocalEventMonitor` that filters events on the status button's
 /// window — the synthetic event satisfies that filter and re-uses the package's
@@ -36,12 +38,15 @@ final class MenuBarPopupController: MenuBarPopupControlling {
     /// the button via `setAccessibilityTitle(title)` where `title` is the first
     /// argument we pass to `FluidMenuBarExtra(...)` in `FineTuneApp`.
     private let accessibilityTitle: String
+    private let popupToggle: (() -> Bool)?
 
-    init(accessibilityTitle: String = "FineTune") {
+    init(accessibilityTitle: String = "FineTune", popupToggle: (() -> Bool)? = nil) {
         self.accessibilityTitle = accessibilityTitle
+        self.popupToggle = popupToggle
     }
 
     func toggle() {
+        if popupToggle?() == true { return }
         guard let statusItem = findStatusItem() else {
             Self.logger.debug("toggle: no status item found yet (cold-launch race?); ignoring")
             return

@@ -90,6 +90,7 @@ struct SystemSoundsRow: View {
             HStack(spacing: DesignTokens.Spacing.sm) {
                 // Leading bell badge — marks this as the system alert/effects channel.
                 DeviceBadge(icon: nil, isSelected: false, fallbackSymbol: "bell.fill")
+                    .padding(.leading, DesignTokens.Dimensions.badgeRowLeadingInset)
 
                 // Name + chevron — tapping toggles the inline device selector, the
                 // same motion as the per-app EQ and per-device AutoEQ panels.
@@ -101,7 +102,7 @@ struct SystemSoundsRow: View {
                             .help("Sound Effects")
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(
                                 isExpanded
                                     ? DesignTokens.Colors.accentPrimary
@@ -113,7 +114,7 @@ struct SystemSoundsRow: View {
 
                     if let subtitle = routingSubtitle {
                         Text(subtitle)
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundStyle(DesignTokens.Colors.textTertiary)
                             .lineLimit(1)
                     }
@@ -137,6 +138,7 @@ struct SystemSoundsRow: View {
                     value: $sliderValue,
                     onEditingChanged: { editing in isEditing = editing }
                 )
+                .frame(width: DesignTokens.Dimensions.sliderWidth)
                 .opacity(showMutedIcon ? 0.5 : 1.0)
                 .onChange(of: sliderValue) { _, newValue in
                     if isUpdatingSliderFromExternal {
@@ -158,9 +160,10 @@ struct SystemSoundsRow: View {
                     }
                 )
                 .opacity(isRowHovered || isEditing || isPercentageEditing ? 1 : 0)
-                .frame(width: isRowHovered || isEditing || isPercentageEditing ? DesignTokens.Dimensions.percentageWidth : 0)
-                .clipped()
+                .frame(width: DesignTokens.Dimensions.percentageWidth)
                 .animation(DesignTokens.Animation.hover, value: isRowHovered || isEditing || isPercentageEditing)
+
+                Color.clear.frame(width: DesignTokens.Dimensions.rowAccessoryWidth, height: 0)
             }
             .frame(height: DesignTokens.Dimensions.rowContentHeight)
             .onChange(of: alertVolume) { _, newValue in
@@ -240,6 +243,7 @@ private struct SoundEffectsDeviceOption: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .onHover { isHovered = $0 }
         .animation(DesignTokens.Animation.hover, value: isHovered)
     }

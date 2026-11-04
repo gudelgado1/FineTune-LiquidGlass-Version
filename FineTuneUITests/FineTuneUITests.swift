@@ -78,7 +78,7 @@ final class FineTuneUITests: XCTestCase {
         )
     }
 
-    func testSettingsWindowExposesPrimaryTabsAndCustomCloseButton() {
+    func testSettingsWindowExposesPrimaryTabsAndNativeCloseButton() {
         relaunchForSettingsUITestHost()
 
         let settingsRoot = app.descendants(matching: .any)["settings.root"]
@@ -94,12 +94,12 @@ final class FineTuneUITests: XCTestCase {
         let closeButton = app.descendants(matching: .any)["settings.close"]
         XCTAssertTrue(
             closeButton.waitForExistence(timeout: 5),
-            "The Settings window should expose the custom close button."
+            "The Settings window should expose its native close button."
         )
         closeButton.click()
         XCTAssertFalse(
             settingsRoot.waitForExistence(timeout: 2),
-            "The custom close button should dismiss the Settings host window."
+            "The native close button should dismiss the Settings host window."
         )
     }
 

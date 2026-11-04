@@ -121,11 +121,4 @@ enum MockData {
 
     // MARK: - Helpers
 
-    static func randomVolume() -> Float {
-        Float.random(in: 0...1)
-    }
-
-    static func randomAudioLevel() -> Float {
-        Float.random(in: 0...0.8)
-    }
 }

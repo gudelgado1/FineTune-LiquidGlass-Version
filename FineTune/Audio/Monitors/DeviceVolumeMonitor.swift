@@ -68,12 +68,16 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
     private let deviceMonitor: AudioDeviceMonitor
     private let settingsManager: SettingsManager
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "DeviceVolumeMonitor")
+    private let backendResolver: ((AudioDeviceID) -> VolumeControlTier)?
+    private let outputVolumeWriter: @MainActor (AudioDeviceID, Float) -> Bool
+    private let muteStateWriter: @MainActor (AudioDeviceID, Bool) -> Bool
 
     #if !APP_STORE
     private let ddcController: DDCController?
     #endif
 
     /// Volume listeners for each tracked output device
+    private var listenerLifetime = UUID()
     private var volumeListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
     /// Mute listeners for each tracked output device
     private var muteListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
@@ -138,15 +142,34 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
     )
 
     #if !APP_STORE
-    init(deviceMonitor: AudioDeviceMonitor, settingsManager: SettingsManager, ddcController: DDCController? = nil) {
+    init(
+        deviceMonitor: AudioDeviceMonitor,
+        settingsManager: SettingsManager,
+        ddcController: DDCController? = nil,
+        backendResolver: ((AudioDeviceID) -> VolumeControlTier)? = nil,
+        outputVolumeWriter: @escaping @MainActor (AudioDeviceID, Float) -> Bool = { $0.setOutputVolumeScalar($1) },
+        muteStateWriter: @escaping @MainActor (AudioDeviceID, Bool) -> Bool = { $0.setMuteState($1) }
+    ) {
         self.deviceMonitor = deviceMonitor
         self.settingsManager = settingsManager
         self.ddcController = ddcController
+        self.backendResolver = backendResolver
+        self.outputVolumeWriter = outputVolumeWriter
+        self.muteStateWriter = muteStateWriter
     }
     #else
-    init(deviceMonitor: AudioDeviceMonitor, settingsManager: SettingsManager) {
+    init(
+        deviceMonitor: AudioDeviceMonitor,
+        settingsManager: SettingsManager,
+        backendResolver: ((AudioDeviceID) -> VolumeControlTier)? = nil,
+        outputVolumeWriter: @escaping @MainActor (AudioDeviceID, Float) -> Bool = { $0.setOutputVolumeScalar($1) },
+        muteStateWriter: @escaping @MainActor (AudioDeviceID, Bool) -> Bool = { $0.setMuteState($1) }
+    ) {
         self.deviceMonitor = deviceMonitor
         self.settingsManager = settingsManager
+        self.backendResolver = backendResolver
+        self.outputVolumeWriter = outputVolumeWriter
+        self.muteStateWriter = muteStateWriter
     }
     #endif
 
@@ -167,6 +190,9 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
     }
 
     private func autoDetectBackend(for deviceID: AudioDeviceID) -> VolumeControlTier {
+        if let backendResolver {
+            return backendResolver(deviceID)
+        }
         if deviceID.hasOutputVolumeControl() {
             return .hardware
         }
@@ -246,6 +272,7 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
     }
 
     func stop() {
+        listenerLifetime = UUID()
         logger.debug("Stopping device volume monitor")
 
         // Stop the device list observation loops
@@ -320,7 +347,7 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
         let clamped = clampedVolume(volume)
         switch outputVolumeBackend(for: deviceID) {
         case .hardware:
-            let success = deviceID.setOutputVolumeScalar(clamped)
+            let success = outputVolumeWriter(deviceID, clamped)
             if !success {
                 logger.warning("HAL write failed for device \(deviceID) — UI will still reflect intended value")
             }
@@ -330,6 +357,9 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
             // alternative (leaving `volumes` stale) breaks media-key UX
             // because subsequent presses compute steps from the wrong base.
             volumes[deviceID] = clamped
+            if clamped == 0, !(muteStates[deviceID] ?? false) {
+                setMute(for: deviceID, to: true)
+            }
 
         case .ddc:
             #if !APP_STORE
@@ -382,7 +412,7 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
 
         switch outputVolumeBackend(for: deviceID) {
         case .hardware:
-            let success = deviceID.setMuteState(muted)
+            let success = muteStateWriter(deviceID, muted)
             if success {
                 muteStates[deviceID] = muted
             } else {
@@ -745,9 +775,11 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
         guard deviceID.isValid else { return }
         guard volumeListeners[deviceID] == nil else { return }
 
+        let lifetime = listenerLifetime
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                self?.handleVolumeChanged(for: deviceID)
+                guard let self, self.listenerLifetime == lifetime else { return }
+                self.handleVolumeChanged(for: deviceID)
             }
         }
 
@@ -810,19 +842,8 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
 
     private func removeVolumeListener(for deviceID: AudioDeviceID) {
         guard let block = volumeListeners.removeValue(forKey: deviceID) else { return }
-
-        let status: OSStatus
-        if let registeredAddr = registeredVolumeAddresses.removeValue(forKey: deviceID) {
-            var addr = registeredAddr
-            status = AudioObjectRemovePropertyListenerBlock(deviceID, &addr, .main, block)
-        } else {
-            var address = volumeAddress
-            status = AudioObjectRemovePropertyListenerBlock(deviceID, &address, .main, block)
-        }
-        // Tolerate kAudioHardwareBadObjectError (-66680): device already destroyed
-        if status != noErr && status != OSStatus(kAudioHardwareBadObjectError) {
-            logger.warning("Failed to remove volume listener for device \(deviceID): \(status)")
-        }
+        let address = registeredVolumeAddresses.removeValue(forKey: deviceID) ?? volumeAddress
+        HALListenerRetirement.remove(deviceID, address: address, block: block)
     }
 
     private func handleVolumeChanged(for deviceID: AudioDeviceID) {
@@ -860,9 +881,11 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
         guard deviceID.isValid else { return }
         guard muteListeners[deviceID] == nil else { return }
 
+        let lifetime = listenerLifetime
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                self?.handleMuteChanged(for: deviceID)
+                guard let self, self.listenerLifetime == lifetime else { return }
+                self.handleMuteChanged(for: deviceID)
             }
         }
 
@@ -884,12 +907,8 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
 
     private func removeMuteListener(for deviceID: AudioDeviceID) {
         guard let block = muteListeners.removeValue(forKey: deviceID) else { return }
-
-        var address = muteAddress
-        let status = AudioObjectRemovePropertyListenerBlock(deviceID, &address, .main, block)
-        if status != noErr && status != OSStatus(kAudioHardwareBadObjectError) {
-            logger.warning("Failed to remove mute listener for device \(deviceID): \(status)")
-        }
+        let address = muteAddress
+        HALListenerRetirement.remove(deviceID, address: address, block: block)
     }
 
     private func handleMuteChanged(for deviceID: AudioDeviceID) {
@@ -1081,9 +1100,11 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
         guard deviceID.isValid else { return }
         guard inputVolumeListeners[deviceID] == nil else { return }
 
+        let lifetime = listenerLifetime
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                self?.handleInputVolumeChanged(for: deviceID)
+                guard let self, self.listenerLifetime == lifetime else { return }
+                self.handleInputVolumeChanged(for: deviceID)
             }
         }
 
@@ -1105,12 +1126,8 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
 
     private func removeInputVolumeListener(for deviceID: AudioDeviceID) {
         guard let block = inputVolumeListeners.removeValue(forKey: deviceID) else { return }
-
-        var address = inputVolumeAddress
-        let status = AudioObjectRemovePropertyListenerBlock(deviceID, &address, .main, block)
-        if status != noErr && status != OSStatus(kAudioHardwareBadObjectError) {
-            logger.warning("Failed to remove input volume listener for device \(deviceID): \(status)")
-        }
+        let address = inputVolumeAddress
+        HALListenerRetirement.remove(deviceID, address: address, block: block)
     }
 
     private func handleInputVolumeChanged(for deviceID: AudioDeviceID) {
@@ -1129,9 +1146,11 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
         guard deviceID.isValid else { return }
         guard inputMuteListeners[deviceID] == nil else { return }
 
+        let lifetime = listenerLifetime
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                self?.handleInputMuteChanged(for: deviceID)
+                guard let self, self.listenerLifetime == lifetime else { return }
+                self.handleInputMuteChanged(for: deviceID)
             }
         }
 
@@ -1153,12 +1172,8 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
 
     private func removeInputMuteListener(for deviceID: AudioDeviceID) {
         guard let block = inputMuteListeners.removeValue(forKey: deviceID) else { return }
-
-        var address = inputMuteAddress
-        let status = AudioObjectRemovePropertyListenerBlock(deviceID, &address, .main, block)
-        if status != noErr && status != OSStatus(kAudioHardwareBadObjectError) {
-            logger.warning("Failed to remove input mute listener for device \(deviceID): \(status)")
-        }
+        let address = inputMuteAddress
+        HALListenerRetirement.remove(deviceID, address: address, block: block)
     }
 
     private func handleInputMuteChanged(for deviceID: AudioDeviceID) {

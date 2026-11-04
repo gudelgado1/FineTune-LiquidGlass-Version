@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>FineTune (Liquid Glass Version) Updates — v2 signing key</title>
+        <link>https://github.com/gudelgado1/FineTune-LiquidGlass-Version</link>
+        <description>Updates for manually installed builds using the v2 Ed25519 key.</description>
+        <language>en</language>
+        <!-- Intentionally empty until a verified v2 release is published. -->
+    </channel>
+</rss>

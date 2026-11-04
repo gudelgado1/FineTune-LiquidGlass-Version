@@ -9,10 +9,6 @@ extension AudioEngine {
         return snapshot
     }
 
-    func resetDiagnostics() {
-        diagnostics = AudioEngineDiagnostics()
-    }
-
     func recordTapCreationFailure() {
         diagnostics.tapCreationFailures += 1
         diagnostics.markEvent()

@@ -20,12 +20,16 @@ extension MenuBarPopupView {
     }
 
     func syncNavOrder() {
-        let activeDevices = showingInputDevices ? sortedInputDevices : sortedDevices
+        let activeDevices = showingInputDevices ? sortedInputDevices : visibleOutputDevices
         navModel.syncOrder(
             activeDevices: activeDevices,
             appPersistenceIDs: audioEngine.displayableApps.map(\.id),
             isEditingPriority: isEditingDevicePriority
         )
+        if let selectedRow, !navModel.orderedRowIDs.contains(selectedRow) {
+            self.selectedRow = hasKeyboardEngaged
+                ? navModel.defaultFocus(defaultOutputUID: currentDefaultDeviceUID()) : nil
+        }
     }
 
     func currentDefaultDeviceUID() -> String? {
@@ -35,6 +39,7 @@ extension MenuBarPopupView {
     }
 
     func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
+        if inlineEditor.isPresented { return .ignored }
         // While editing a text field (e.g. the percentage editor), let Return /
         // arrows / etc. flow to the field editor instead of driving row nav — see
         // `isEditingText`. Fixes: typing a value + Enter closed the popup without
@@ -43,12 +48,22 @@ extension MenuBarPopupView {
 
         let mods = keyPress.modifiers
         let isM = keyPress.key == KeyEquivalent("m")
+        // A bare digit types a percentage into the selected row. Modified digits
+        // are left alone — ⌘1 and friends belong to the system, not to us.
+        let digit: String? = {
+            guard mods.isEmpty, let scalar = keyPress.characters.unicodeScalars.first,
+                  keyPress.characters.count == 1, ("0"..."9").contains(keyPress.characters)
+            else { return nil }
+            _ = scalar
+            return keyPress.characters
+        }()
+        let isDigit = digit != nil
         let isRecognized: Bool = {
             switch keyPress.key {
             case .upArrow, .downArrow, .leftArrow, .rightArrow, .return, .space, .tab:
                 return true
             default:
-                return isM
+                return isM || isDigit
             }
         }()
         // Wake gate: compute target locally so first-press actions never read a
@@ -91,6 +106,11 @@ extension MenuBarPopupView {
             toggleDeviceTab()
             return .handled
         default:
+            if let digit, target != nil {
+                // The focused row's editor picks this up (see EditablePercentage).
+                textEntry.send(digit: digit)
+                return .handled
+            }
             return isM ? toggleMute(for: target) : .ignored
         }
     }
@@ -213,7 +233,7 @@ extension MenuBarPopupView {
             NSApp.keyWindow?.resignKey()
             return .handled
         case .app(let persistenceID):
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            withAnimation(DesignTokens.Animation.disclosure) {
                 expandedRowID = (expandedRowID == persistenceID) ? nil : persistenceID
             }
             return .handled
@@ -221,7 +241,7 @@ extension MenuBarPopupView {
     }
 
     func toggleDeviceTab() {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+        withAnimation(DesignTokens.Animation.disclosure) {
             showingInputDevices.toggle()
         }
     }

@@ -43,6 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 @main
 struct FineTuneApp: App {
+    /// Process-lifetime activity token that opts FineTune out of App Nap /
+    /// App Sleep (see init). Held forever by design — never end it.
+    private static var appNapActivity: NSObjectProtocol?
+
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var audioEngine: AudioEngine
     @State private var accessibility: AccessibilityPermissionService
@@ -57,6 +61,7 @@ struct FineTuneApp: App {
     @State private var resolver: TargetAppResolver
     @StateObject private var updateManager = UpdateManager()
     @State private var showMenuBarExtra = true
+    @State private var statusItemMenu = StatusItemMenu()
     @State private var customSettingsWindow: NSWindow?
 
     /// Snapshot icon computed at launch from the user's chosen style and the current
@@ -70,9 +75,15 @@ struct FineTuneApp: App {
         Settings {
             settingsContent
         }
-        FluidMenuBarExtra("FineTune", image: launchIconImage, isInserted: $showMenuBarExtra) {
+        FluidMenuBarExtra(
+            "FineTune",
+            image: launchIconImage,
+            isInserted: $showMenuBarExtra,
+            menu: statusItemMenu.configured(audioEngine: audioEngine, openSettings: openCustomSettingsWindow)
+        ) {
             menuBarContent
         }
+        .volumeHUDAnchor(hudController.menuBarAnchor)
     }
 
     @ViewBuilder
@@ -114,7 +125,6 @@ struct FineTuneApp: App {
 
     private func openCustomSettingsWindow() {
         if let window = customSettingsWindow {
-            window.center()
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -125,8 +135,8 @@ struct FineTuneApp: App {
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
 
         let window = SettingsPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
-            styleMask: [.borderless, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 760),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -137,8 +147,9 @@ struct FineTuneApp: App {
         window.isMovableByWindowBackground = false
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenAuxiliary]
-        window.minSize = NSSize(width: 860, height: 580)
+        window.minSize = NSSize(width: 920, height: 640)
         window.center()
+        window.setFrameAutosaveName("FineTune.Settings")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         customSettingsWindow = window
@@ -158,6 +169,20 @@ struct FineTuneApp: App {
         // Destroy any orphaned aggregate devices from previous crashes
         OrphanedTapCleanup.destroyOrphanedDevices()
 
+        // NEVER let macOS App Nap / App Sleep this process. Every audio app is
+        // tapped with `.mutedWhenTapped` and FineTune's own IO blocks render the
+        // replacement audio — a napped/throttled FineTune therefore mutes the
+        // ENTIRE machine (menu bar app + display asleep + no windows is exactly
+        // the App Nap profile). `AllowingIdleSystemSleep` keeps normal system
+        // power behavior; only process-level throttling is prevented.
+        Self.appNapActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "System-wide per-app audio processing"
+        )
+
+        let bundleVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        DiagnosticLog.log("=== FineTune launched (v\(bundleVersion)) — App Nap disabled ===")
+
         let settings = SettingsManager()
         let profileManager = AutoEQProfileManager()
         let permission = AudioRecordingPermission()
@@ -171,6 +196,9 @@ struct FineTuneApp: App {
         let statusService = MediaKeyStatus()
         let popupService = PopupVisibilityService()
         let hud = HUDWindowController(settingsManager: settings, mediaKeyStatus: statusService, popupVisibility: popupService)
+        // Restores the macOS "play feedback when volume is changed" pop: FineTune
+        // swallows the media keys, so the system stops playing it while we run.
+        let feedbackPlayer = VolumeFeedbackPlayer()
 
         // Wire the interactive Tahoe slider back to the device volume monitor.
         // Mirrors the mute semantics applied for media-key drags (auto-unmute
@@ -191,6 +219,9 @@ struct FineTuneApp: App {
             }
             let gain = VolumeMapping.systemGain(forSliderFraction: sliderFraction, tier: tier)
             volumeMonitor.setVolume(for: deviceID, to: gain)
+            feedbackPlayer.requestFeedback(
+                gain: VolumeFeedback.gain(tier: tier, sliderFraction: sliderFraction)
+            )
         }
 
         let monitor = MediaKeyMonitor(
@@ -202,6 +233,8 @@ struct FineTuneApp: App {
             popupVisibility: popupService,
             mediaKeyStatus: statusService
         )
+        monitor.feedbackPlayer = feedbackPlayer
+
         _accessibility = State(initialValue: accessibilityService)
         _notifications = State(initialValue: notificationPermission)
         _mediaKeyStatus = State(initialValue: statusService)
@@ -209,7 +242,11 @@ struct FineTuneApp: App {
         _hudController = State(initialValue: hud)
         _mediaKeyMonitor = State(initialValue: monitor)
 
-        let coordinator = MenuBarIconCoordinator(deviceVolumeMonitor: engine.deviceVolumeMonitor as! DeviceVolumeMonitor, settings: settings)
+        let coordinator = MenuBarIconCoordinator(
+            deviceVolumeMonitor: engine.deviceVolumeMonitor as! DeviceVolumeMonitor,
+            deviceProvider: engine.deviceMonitor,
+            settings: settings
+        )
         monitor.iconCoordinator = coordinator
         // Defer start() so NSApplication.shared is fully bootstrapped before we walk NSApp.windows.
         DispatchQueue.main.async { [coordinator] in coordinator.start() }
@@ -224,7 +261,11 @@ struct FineTuneApp: App {
             volume: launchVolumeMonitor.volumes[launchID] ?? 1.0,
             muted: launchVolumeMonitor.muteStates[launchID] ?? false
         )
+        // Fall back through the same renderer, not a raw NSImage: an unrenderable
+        // symbol (stale override, glyph dropped by a macOS release) would otherwise
+        // hand the status item an off-canvas image and make its width jump.
         launchIconImage = launchState.image.nsImage()
+            ?? MenuBarIconImage.systemSymbol("speaker.wave.2").nsImage()
             ?? NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "FineTune")!
 
         // Start Accessibility polling immediately so `isTrustedCached` is live
@@ -242,7 +283,9 @@ struct FineTuneApp: App {
         // permission required for the hotkey itself). Registry start() is deferred
         // to a SwiftUI `.task` on the popup content so the FluidMenuBarExtra
         // status item has been materialized before any hotkey can fire.
-        let popupController = MenuBarPopupController()
+        let popupController = MenuBarPopupController(popupToggle: { [weak anchor = hud.menuBarAnchor] in
+            anchor?.togglePopupPresentation() ?? false
+        })
         let resolver = TargetAppResolver(
             ownBundleID: Bundle.main.bundleIdentifier ?? "com.finetuneapp.FineTune"
         )
@@ -307,6 +350,7 @@ struct FineTuneApp: App {
             queue: .main
         ) { [settings, monitor, accessibilityService, hud, coordinator] _ in
             MainActor.assumeIsolated {
+                DiagnosticLog.log("=== willTerminate: graceful quit (orphan sweep + teardown) ===")
                 // Synchronously destroy this instance's aggregate devices BEFORE the
                 // process exits. CoreAudio aggregate devices are system-wide and
                 // survive process death, so a normal quit would otherwise LEAK them —
