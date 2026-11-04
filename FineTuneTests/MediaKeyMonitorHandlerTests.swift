@@ -143,6 +143,36 @@ struct MediaKeyMonitorHandlerTests {
         #expect(writtenVolume == 0.0)
     }
 
+    @Test("Keyboard path writes hardware mute when volume reaches zero")
+    func keyboardZeroWritesMute() {
+        let (monitor, _, _, _) = makeMonitor()
+        let settings = SettingsManager(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        var writtenMute: Bool?
+        let volume = DeviceVolumeMonitor(
+            deviceMonitor: AudioDeviceMonitor(),
+            settingsManager: settings,
+            backendResolver: { _ in .hardware },
+            outputVolumeWriter: { _, _ in true },
+            muteStateWriter: { _, muted in
+                writtenMute = muted
+                return true
+            }
+        )
+
+        monitor.handleCore(
+            event: .volumeDown(isRepeat: false),
+            deviceID: 42,
+            tier: .hardware,
+            deviceName: "Test Device",
+            currentVolume: 0.01,
+            currentMute: false,
+            setVolume: { volume.setVolume(for: $0, to: $1) },
+            setMute: { volume.setMute(for: $0, to: $1) }
+        )
+
+        #expect(writtenMute == true)
+    }
+
     // MARK: - Repeat handling (AC #6, #7, #8, #10)
 
     @Test("volumeUp(isRepeat: true) from 0.5 steps volume to 0.5625 (AC #7 companion)")

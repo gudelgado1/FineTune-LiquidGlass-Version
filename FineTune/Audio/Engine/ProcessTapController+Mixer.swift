@@ -91,6 +91,7 @@ extension ProcessTapController {
                 let sampleCount = frameCount * inputChannels
                 for frame in 0..<frameCount {
                     currentVol += (targetVol - currentVol) * rampCoefficient
+                    if targetVol == 0, currentVol < 0.0001 { currentVol = 0 }
                     let gain = currentVol * crossfadeMultiplier
                     let base = frame * inputChannels
                     for ch in 0..<inputChannels {
@@ -103,6 +104,7 @@ extension ProcessTapController {
             } else if inputChannels == 2 && outputChannels > 2 {
                 for frame in 0..<frameCount {
                     currentVol += (targetVol - currentVol) * rampCoefficient
+                    if targetVol == 0, currentVol < 0.0001 { currentVol = 0 }
                     let gain = currentVol * crossfadeMultiplier
                     let inBase = frame * 2
                     let outBase = frame * outputChannels
@@ -122,6 +124,7 @@ extension ProcessTapController {
             } else if inputChannels == 1 && outputChannels > 1 {
                 for frame in 0..<frameCount {
                     currentVol += (targetVol - currentVol) * rampCoefficient
+                    if targetVol == 0, currentVol < 0.0001 { currentVol = 0 }
                     let gain = currentVol * crossfadeMultiplier
                     let sample = inputSamples[frame] * gain
                     let outBase = frame * outputChannels
@@ -139,6 +142,7 @@ extension ProcessTapController {
             } else {
                 for frame in 0..<frameCount {
                     currentVol += (targetVol - currentVol) * rampCoefficient
+                    if targetVol == 0, currentVol < 0.0001 { currentVol = 0 }
                     let gain = currentVol * crossfadeMultiplier
                     let inBase = frame * inputChannels
                     let outBase = frame * outputChannels

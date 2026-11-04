@@ -68,6 +68,9 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
     private let deviceMonitor: AudioDeviceMonitor
     private let settingsManager: SettingsManager
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "DeviceVolumeMonitor")
+    private let backendResolver: ((AudioDeviceID) -> VolumeControlTier)?
+    private let outputVolumeWriter: @MainActor (AudioDeviceID, Float) -> Bool
+    private let muteStateWriter: @MainActor (AudioDeviceID, Bool) -> Bool
 
     #if !APP_STORE
     private let ddcController: DDCController?
@@ -139,15 +142,34 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
     )
 
     #if !APP_STORE
-    init(deviceMonitor: AudioDeviceMonitor, settingsManager: SettingsManager, ddcController: DDCController? = nil) {
+    init(
+        deviceMonitor: AudioDeviceMonitor,
+        settingsManager: SettingsManager,
+        ddcController: DDCController? = nil,
+        backendResolver: ((AudioDeviceID) -> VolumeControlTier)? = nil,
+        outputVolumeWriter: @escaping @MainActor (AudioDeviceID, Float) -> Bool = { $0.setOutputVolumeScalar($1) },
+        muteStateWriter: @escaping @MainActor (AudioDeviceID, Bool) -> Bool = { $0.setMuteState($1) }
+    ) {
         self.deviceMonitor = deviceMonitor
         self.settingsManager = settingsManager
         self.ddcController = ddcController
+        self.backendResolver = backendResolver
+        self.outputVolumeWriter = outputVolumeWriter
+        self.muteStateWriter = muteStateWriter
     }
     #else
-    init(deviceMonitor: AudioDeviceMonitor, settingsManager: SettingsManager) {
+    init(
+        deviceMonitor: AudioDeviceMonitor,
+        settingsManager: SettingsManager,
+        backendResolver: ((AudioDeviceID) -> VolumeControlTier)? = nil,
+        outputVolumeWriter: @escaping @MainActor (AudioDeviceID, Float) -> Bool = { $0.setOutputVolumeScalar($1) },
+        muteStateWriter: @escaping @MainActor (AudioDeviceID, Bool) -> Bool = { $0.setMuteState($1) }
+    ) {
         self.deviceMonitor = deviceMonitor
         self.settingsManager = settingsManager
+        self.backendResolver = backendResolver
+        self.outputVolumeWriter = outputVolumeWriter
+        self.muteStateWriter = muteStateWriter
     }
     #endif
 
@@ -168,6 +190,9 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
     }
 
     private func autoDetectBackend(for deviceID: AudioDeviceID) -> VolumeControlTier {
+        if let backendResolver {
+            return backendResolver(deviceID)
+        }
         if deviceID.hasOutputVolumeControl() {
             return .hardware
         }
@@ -322,7 +347,7 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
         let clamped = clampedVolume(volume)
         switch outputVolumeBackend(for: deviceID) {
         case .hardware:
-            let success = deviceID.setOutputVolumeScalar(clamped)
+            let success = outputVolumeWriter(deviceID, clamped)
             if !success {
                 logger.warning("HAL write failed for device \(deviceID) — UI will still reflect intended value")
             }
@@ -332,6 +357,9 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
             // alternative (leaving `volumes` stale) breaks media-key UX
             // because subsequent presses compute steps from the wrong base.
             volumes[deviceID] = clamped
+            if clamped == 0, !(muteStates[deviceID] ?? false) {
+                setMute(for: deviceID, to: true)
+            }
 
         case .ddc:
             #if !APP_STORE
@@ -384,7 +412,7 @@ final class DeviceVolumeMonitor: DeviceVolumeProviding {
 
         switch outputVolumeBackend(for: deviceID) {
         case .hardware:
-            let success = deviceID.setMuteState(muted)
+            let success = muteStateWriter(deviceID, muted)
             if success {
                 muteStates[deviceID] = muted
             } else {

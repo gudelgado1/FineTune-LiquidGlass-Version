@@ -511,6 +511,26 @@ struct VolumeRampTests {
         #expect(abs(lastSample) < 1e-6, "Last sample should be near-zero")
     }
 
+    @Test("Zero target volume: ramp reaches exact digital silence")
+    func zeroTargetReachesExactSilence() {
+        let frames = 8192
+        let input = TestABL(buffers: [(channels: 2, frames: frames)])
+        let output = TestABL(buffers: [(channels: 2, frames: frames)])
+        fill(input, bufferIndex: 0, value: 1.0)
+
+        var vol: Float = 1.0
+        processWithDefaults(
+            input: input, output: output,
+            targetVol: 0.0, rampCoefficient: 0.01,
+            currentVol: &vol
+        )
+
+        #expect(vol == 0.0, "Volume zero must reach exact zero, not only approach it. Got \(vol)")
+        let outData = output.data(at: 0)
+        let lastSample = outData[(frames - 1) * 2]
+        #expect(lastSample == 0.0, "Volume zero must produce exact digital silence. Got \(lastSample)")
+    }
+
     @Test("Unmute from zero: ramp recovers to target")
     func unmuteFromZero() {
         let frames = 4096

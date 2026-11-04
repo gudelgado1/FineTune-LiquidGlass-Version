@@ -350,10 +350,9 @@ final class AudioEngine {
             guard let deviceUID = self.deviceMonitor.outputDevices.first(where: { $0.id == deviceID })?.uid else { return }
             let loudnessEnabled = self.settingsManager.appSettings.loudnessCompensationEnabled
             for (_, tap) in self.taps {
-                if tap.currentDeviceUID == deviceUID {
+                if tap.currentDeviceUIDs.contains(deviceUID) {
                     tap.currentDeviceVolume = newVolume
-                    if tap.currentDeviceUIDs.count == 1,
-                       self.outputVolumeBackend(for: deviceID) == .software {
+                    if self.outputVolumeBackend(for: deviceID) == .software {
                         tap.volume = self.effectiveVolume(for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
                     }
                     tap.updateLoudnessCompensation(
@@ -368,10 +367,9 @@ final class AudioEngine {
             guard let self else { return }
             guard let deviceUID = self.deviceMonitor.outputDevices.first(where: { $0.id == deviceID })?.uid else { return }
             for (_, tap) in self.taps {
-                if tap.currentDeviceUID == deviceUID {
+                if tap.currentDeviceUIDs.contains(deviceUID) {
                     tap.isDeviceMuted = isMuted
-                    if tap.currentDeviceUIDs.count == 1,
-                       self.outputVolumeBackend(for: deviceID) == .software {
+                    if self.outputVolumeBackend(for: deviceID) == .software {
                         tap.volume = self.effectiveVolume(for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
                     }
                 }
@@ -566,13 +564,21 @@ final class AudioEngine {
     /// single-device software output gain for software-backed devices.
     /// Single-device-routed apps on `.software`-backed devices always receive the
     /// device's software gain; multi-destination routing keeps `appGain` alone
-    /// because per-device software gain has no unambiguous meaning across fan-out.
+    /// except when every routed software device is at zero, which is unambiguous silence.
     func effectiveVolume(for pid: pid_t, deviceUIDs: [String]? = nil) -> Float {
         let appGain = volumeState.getVolume(for: pid) * volumeState.getBoost(for: pid).rawValue
 
-        guard let resolvedUIDs = deviceUIDs, resolvedUIDs.count == 1,
-              let primaryUID = resolvedUIDs.first,
-              let device = deviceMonitor.device(for: primaryUID),
+        guard let resolvedUIDs = deviceUIDs else { return appGain }
+        let devices = resolvedUIDs.compactMap { deviceMonitor.device(for: $0) }
+        if resolvedUIDs.count > 1,
+           devices.count == resolvedUIDs.count,
+           devices.allSatisfy({ outputVolumeBackend(for: $0.id) == .software }),
+           devices.allSatisfy({ deviceVolumeMonitor.outputProcessingGain(for: $0.id) == 0 }) {
+            return 0
+        }
+
+        guard resolvedUIDs.count == 1,
+              let device = devices.first,
               outputVolumeBackend(for: device.id) == .software else {
             return appGain
         }

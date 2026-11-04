@@ -275,8 +275,8 @@ final class MediaKeyMonitor {
     /// Volume-up from a muted state simply unmutes and steps from the
     /// captured `currentVolume` — we no longer try to restore a saved
     /// pre-mute level (that produced surprising jumps on AutoDDC monitors).
-    /// Volume-down no longer auto-mutes when reaching zero; volume at 0
-    /// with no mute flag is plain silent, and the next F12 cleanly steps up.
+    /// Volume-down does not directly auto-mute at zero. The hardware backend
+    /// mutes at zero to guarantee silence; the next F12 unmutes and steps up.
     func handleCore(
         event: MediaKeyEvent,
         deviceID: AudioDeviceID,
@@ -301,8 +301,7 @@ final class MediaKeyMonitor {
             }
 
             // F12 always *steps up* the visible volume. If we happen to be
-            // muted (only possible now via explicit F10 / popup mute — the
-            // auto-mute-at-zero behavior has been removed from volumeDown),
+            // muted (explicitly or after the hardware backend reached zero),
             // unmute first; the step then advances from the current visible
             // level. We do NOT restore the pre-mute saved volume — that
             // surprised users on AutoDDC monitors where the saved value
@@ -333,11 +332,9 @@ final class MediaKeyMonitor {
 
             // If we're muted and stepping down would land on an audible value,
             // unmute first (so the user's "step down" works after a previous
-            // F10 mute). We deliberately do NOT auto-mute when nextSlider hits
-            // zero — the previous behavior trapped users on DDC devices: F11
-            // → 0 set the mute flag, F12 then restored the stale `savedVolume`
-            // (e.g. 71%) instead of stepping back to 6.25%. Volume at 0 with
-            // no mute flag is plain "silent" — the next F12 cleanly steps up.
+            // F10 mute). The handler does not directly auto-mute at zero;
+            // DeviceVolumeMonitor handles that only for the hardware backend,
+            // avoiding the old DDC savedVolume restore trap.
             if currentMute && !willBeSilent {
                 setMute(deviceID, false)
             }
